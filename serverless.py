@@ -9,6 +9,12 @@ class Serverless(Instance):
         self.last_time = -1
         return
     
+    def getLastTime(self):
+        return self.last_time
+    
+    def setLastTime(self, time):
+        self.last_time = time
+        
     def activateInstance(self):
         self.setuptimer = Config.CONFIG_DEFAULT_SETUPTIME * Config.SIM_STEP_PER_TIME
         self.setStatus(Status.SETUP)
@@ -21,38 +27,7 @@ class Serverless(Instance):
             self.setStatus(Status.ACTIVE)
             print("COMPLETE SCALE OUT: " + str(self.getId()))
         return
-    
-    def deactivateInstance(self):
-        self.deactivatetimer = Config.CONFIG_DEFAULT_SHUTDOWNTIME * Config.SIM_STEP_PER_TIME
-        print("START SCALE IN")
-        return
-    
-    def shutdownInstance(self):
-        self.deactivatetimer -= 1
-        if self.deactivatetimer < 0:
-            self.setStatus(Status.INACTIVE)
-            self.setCpuCtr(0)
-            print("COMPLETE SCALE IN: " + str(self.getId()))
-        return
-    
-    def runStep(self, time):
-        status = self.getStatus()
-        if status == Status.ACTIVE or status == Status.WORKING:
-            end_reqs, is_process = self.processRequests(time)
-            length = self.getQueueLength()
-            return end_reqs, length, is_process
-        elif status == Status.SETUP:
-            self.setupInstance()
-        elif status == Status.SHUTDOWN:
-            self.shutdownInstance()
-        return [], self.getQueueLength(), False
-    
-    def getLastTime(self):
-        return self.last_time
-    
-    def setLastTime(self, time):
-        self.last_time = time
-    
+
     def processRequest(self, req:Request, time):
         workload = req.getWorkload()
         if workload > 0:

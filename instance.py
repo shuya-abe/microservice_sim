@@ -62,23 +62,6 @@ class Instance:
         return self.status
     
     def processRequest(self, req:Request, time):
-        workload = req.getWorkload()
-        if workload > 0:
-            if req.getStatus() != Status.PROCESSING:
-                req.setStatus(Status.PROCESSING)
-                req.setStartProcessTime(time / Config.SIM_STEP_PER_TIME)
-            workload -= self.processing_capacity
-            req.setWorkload(workload)
-            if workload <= 0:
-                req.setStatus(Status.FINISHED)
-                req.setEndTime(time / Config.SIM_STEP_PER_TIME)
-                self.delRequest(req)
-                return req
-        else:
-            req.setStatus(Status.FINISHED)
-            req.setEndTime(time / Config.SIM_STEP_PER_TIME)
-            self.delRequest(req)
-            return req
         return None
 
     def processRequests(self, time):
@@ -116,19 +99,9 @@ class Instance:
         return self.CpuCtr
     
     def activateInstance(self, scaler):
-        self.scaler = scaler
-        self.setuptimer = Config.CONFIG_DEFAULT_SETUPTIME * Config.SIM_STEP_PER_TIME
-        self.setStatus(Status.SETUP)
-        print("START SCALE OUT")
         return
     
     def setupInstance(self):
-        self.setuptimer -= 1
-        if self.setuptimer <= 0:
-            self.setStatus(Status.ACTIVE)
-            print("COMPLETE SCALE OUT: " + str(self.getId()))
-            self.scaler.registerInstance2Balancer(self)
-            self.scaler = None
         return
     
     def deactivateInstance(self):
