@@ -1,16 +1,24 @@
 from status import Status
 from config import Config
 import math
+from sim_flg import Flg
 
 class Scaler:
     
     def __init__(self, balancer = None):
         self.setBalancer(balancer)
-        self.containers = []
-        self.num_active_container = 0
+        self.instances = []
+        self.num_active_instance = 0
+        self.mode = Config.CONFIG_INSTANCE_FLG
         return
     
     def runStep(self, timestep):
+        if self.mode == Flg.FLG_CONTAINER:
+            self.runStep4Container(timestep)
+        elif self.mode == Flg.FLG_SERVERLESS:
+            self.runStep4Serverless(timestep)
+    
+    def runStep4Container(self, timestep):
         if not self.isTime2Check(timestep):
             return
         
@@ -24,6 +32,12 @@ class Scaler:
             print("no Scale change")
         return
     
+    def runStep4Serverless(self, timestep):
+        for instance in self.getInstances():
+            if instance.getStatus() == Status.ACTIVE:
+                if timestep - instance.getLastTime() >= Config.CONFIG_SERVERLESS_TIMER * Config.SIM_STEP_PER_TIME:
+                    self.deactivateOldInstance(instance)
+    
     def setBalancer(self, balancer):
         self.balancer = balancer
         return
@@ -31,62 +45,77 @@ class Scaler:
     def getBalancer(self):
         return self.balancer
     
-    def addContainer(self, container):
-        self.containers.append(container)
-        if container.getStatus() == Status.ACTIVE:
-            self.num_active_container += 1
-            self.registerContainer2Balancer(container)
+    def addInstance(self, instance):
+        self.instances.append(instance)
+        if instance.getStatus() == Status.ACTIVE:
+            self.num_active_instance += 1
+            self.registerInstance2Balancer(instance)
         return
     
-    def getContainers(self):
-        return self.containers
+    def getInstances(self):
+        return self.instances
     
-    def registerContainer2Balancer(self, container):
-        self.getBalancer().addContainer(container)
+    def registerInstance2Balancer(self, instance):
+        self.getBalancer().addInstance(instance)
         return
     
-    def removeContainerFromBalancer(self, container):
-        self.getBalancer().delContainer(container)
+    def removeInstanceFromBalancer(self, instance):
+        self.getBalancer().delInstance(instance)
         return
     
     def scaleOut(self, metrics):
-        ideal_num_container = math.ceil(self.num_active_container * metrics)
-        num_active_container = self.num_active_container
-        for container in self.getContainers():
-            if ideal_num_container <= num_active_container:
+        ideal_num_instance = math.ceil(self.num_active_instance * metrics)
+        num_active_instance = self.num_active_instance
+        for instance in self.getInstances():
+            if ideal_num_instance <= num_active_instance:
                 return
-            if container.getStatus() == Status.INACTIVE:
+            if instance.getStatus() == Status.INACTIVE:
                 print("Scale Out")
-                container.activateContainer(self)
-                num_active_container += 1
+                instance.activateInstance(self)
+                num_active_instance += 1
         return
+    
+    def coldStartInstance(self):
+        for instance in self.getInstances():
+            if instance.getStatus() == Status.INACTIVE:
+                print("Cold Start")
+                instance.activateInstance()
+                self.registerInstance2Balancer(instance)
+                return instance
     
     def scaleIn(self, metrics):
-        ideal_num_container = max(1, math.ceil(self.num_active_container * metrics))
-        num_active_container = self.num_active_container
-        for container in reversed(self.getContainers()):
-            if ideal_num_container >= num_active_container:
+        ideal_num_instance = max(1, math.ceil(self.num_active_instance * metrics))
+        num_active_instance = self.num_active_instance
+        for instance in reversed(self.getInstances()):
+            if ideal_num_instance >= num_active_instance:
                 return
-            status = container.getStatus()
-            if (status == Status.WORKING or status == Status.ACTIVE) and container.deactivatetimer < 0:
+            status = instance.getStatus()
+            if (status == Status.WORKING or status == Status.ACTIVE) and instance.deactivatetimer < 0:
                 print("Scale In")
-                container.deactivateContainer()
-                self.removeContainerFromBalancer(container)
-                num_active_container -= 1
+                instance.deactivateInstance()
+                self.removeInstanceFromBalancer(instance)
+                num_active_instance -= 1
         return
     
+    def deactivateOldInstance(self, instance):
+        status = instance.getStatus()
+        if (status == Status.WORKING or status == Status.ACTIVE) and instance.deactivatetimer < 0:
+            print("deactivate Old Instance")
+            instance.deactivateInstance()
+            self.removeInstanceFromBalancer(instance)
+   
     def getMetrics(self):
-        self.num_active_container = 0
+        self.num_active_instance = 0
         cpu_util = 0
-        for container  in self.getContainers():
-            status = container.getStatus()
-            if (status == Status.WORKING or status == Status.ACTIVE) and container.deactivatetimer < 0:
-                cpu_util += container.getCpuUtilization()
-                container.setCpuCtr(0)
-                self.num_active_container += 1
-        cpu_util /= self.num_active_container
-        ideal_container =  cpu_util / Config.CONFIG_SCALE_TARGET
-        return ideal_container
+        for instance  in self.getInstances():
+            status = instance.getStatus()
+            if (status == Status.WORKING or status == Status.ACTIVE) and instance.deactivatetimer < 0:
+                cpu_util += instance.getCpuUtilization()
+                instance.setCpuCtr(0)
+                self.num_active_instance += 1
+        cpu_util /= self.num_active_instance
+        ideal_instance =  cpu_util / Config.CONFIG_SCALE_TARGET
+        return ideal_instance
     
     def isTime2Check(self, timestep):
         return timestep != 0 and (timestep % (Config.CONFIG_SCALE_INTERVAL * Config.SIM_STEP_PER_TIME)) == 0

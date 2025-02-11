@@ -18,7 +18,7 @@ class Config:
     ### GENERATOR & SENDER ###
     # λ(ラムダ):客の平均到着率[人/時]⇔1/λ:客の平均到着間隔[時/人]
     # μ(ミュー):一つの窓口の平均サービス率[人/時]⇔1/μ:窓口の平均サービス時間[時/人]
-    CONFIG_LAMBDA = 1 * 10
+    CONFIG_LAMBDA = 10
     CONFIG_MU = 1
 
     CONFIG_REQUEST_FLG = Flg.FLG_INPUT
@@ -36,19 +36,22 @@ class Config:
     CONFIG_SCALE_SENSITIVE = 0.1
     CONFIG_SCALE_INTERVAL = 60
     CONFIG_SCALE_TARGET = 0.6
+    CONFIG_SERVERLESS_TIMER = 10
     
-    ### CONTAINER ###
+    ### INSTANCE ###
+    CONFIG_INSTANCE_FLG = Flg.FLG_CONTAINER
+    
     CONFIG_DEFAULT_FLG = True
-    CONFIG_DEFAULT_NUM = 100
+    CONFIG_DEFAULT_NUM = 1000
     CONFIG_DEFAULT_SETUPTIME = 1
     CONFIG_DEFAULT_SHUTDOWNTIME = 1
     
     CONFIG_DEFAULT_CAPACITY = 100
-    CONFIG_DEFAULT_num_CPU = 1
+    CONFIG_DEFAULT_num_CPU = 2
     CONFIG_DEFAULT_QUEUE_LENGTH = -1
     CONFIG_DEFAULT_STATUS = Status.INACTIVE
 
-    CONFIG_CONTAINERS = [
+    CONFIG_INSTANCES = [
         (CONFIG_DEFAULT_CAPACITY, CONFIG_DEFAULT_num_CPU, CONFIG_DEFAULT_QUEUE_LENGTH, Status.ACTIVE),
         (CONFIG_DEFAULT_CAPACITY, CONFIG_DEFAULT_num_CPU, CONFIG_DEFAULT_QUEUE_LENGTH, Status.INACTIVE),
         (CONFIG_DEFAULT_CAPACITY, CONFIG_DEFAULT_num_CPU, CONFIG_DEFAULT_QUEUE_LENGTH, Status.INACTIVE),
@@ -67,7 +70,7 @@ class Config:
 
     SIM_DEFAULT_OUTPUT_FILE = "./result/result.csv"
     SIM_DEFAULT_SERVER_OUTPUT_FILE = "./result/" + str(date) + str(CONFIG_DEFAULT_NUM) + "srv_" + str(CONFIG_DEFAULT_num_CPU) + "CPU_" + str(SIM_THRESHOLD) + "step_lambda" + str(CONFIG_LAMBDA) + "_mu" + str(CONFIG_MU) + "_" + str(date)
-    SIM_OUTPUT_FILE = "./result/" + str(date) + str(len(CONFIG_CONTAINERS)) + "srv_" + str(CONFIG_DEFAULT_num_CPU) + "CPU_" + str(SIM_THRESHOLD) + "step_lambda" + str(CONFIG_LAMBDA) + "_mu" + str(CONFIG_MU) + "_" + str(date)
+    SIM_OUTPUT_FILE = "./result/" + str(date) + str(len(CONFIG_INSTANCES)) + "srv_" + str(CONFIG_DEFAULT_num_CPU) + "CPU_" + str(SIM_THRESHOLD) + "step_lambda" + str(CONFIG_LAMBDA) + "_mu" + str(CONFIG_MU) + "_" + str(date)
 
     def __init__(self):
         return

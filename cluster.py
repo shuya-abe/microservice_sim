@@ -1,7 +1,7 @@
 import numpy.random as rd
 import math
 from request import Request
-from container import Container
+from instance import Instance
 from limit import Limit
 from config import Config
 from status import Status
@@ -10,7 +10,7 @@ class Cluster:
 
     def __init__(self):
         self.balancer = None
-        self.containers = []
+        self.instances = []
         self.scaler = None
         self.num_CPU = Config.CONFIG_CLUSTER_CPU
         self.num_active_CPU = 0
@@ -32,21 +32,21 @@ class Cluster:
     def getMaxCPU(self):
         return self.num_CPU
 
-    def addContainer(self, container):
-        num_cpu = container.getNumCPU() + self.getActiveCPU()
+    def addInstance(self, instance):
+        num_cpu = instance.getNumCPU() + self.getActiveCPU()
         if num_cpu > self.getMaxCPU():
             print("ERROR: shortage CPU")
             return
         else:
-            self.containers.append(container)
+            self.instances.append(instance)
             self.setActiveCPU(num_cpu) 
         return
 
-    def getContainers(self):
-        return self.containers
+    def getInstances(self):
+        return self.instances
     
-    def getNumOfContainers(self):
-        return len(self.containers)
+    def getNumOfInstances(self):
+        return len(self.instances)
 
     def addScaler(self, scaler):
         self.scaler = scaler
@@ -55,8 +55,8 @@ class Cluster:
     def getScaler(self):
         return self.scaler
     
-    def registerContainer2Scaler(self, container):
-        self.scaler.addContainer(container)
+    def registerInstance2Scaler(self, instance):
+        self.scaler.addInstance(instance)
         return
 
     def addRequest(self, request: Request):

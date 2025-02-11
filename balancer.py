@@ -1,21 +1,24 @@
-import numpy.random as rd
-import math
 from request import Request
-from container import Container
-from limit import Limit
-from config import Config
+from instance import Instance
 from status import Status
+from config import Config
+from sim_flg import Flg
 
 class Balancer:
-    # containers: list[Container] = []
-    # requests: list[Request] = []
-    # last_Container = -1
 
     def __init__(self):
-        self.containers: list[Container] = []
+        self.instances: list[Instance] = []
         self.requests: list[Request] = []
-        self.last_Container = -1
+        self.last_instance = -1
+        self.mode = Config.CONFIG_INSTANCE_FLG
+        self.scaler = None
         return
+    
+    def setScaler(self, scaler):
+        self.scaler = scaler
+        
+    def getScaler(self):
+        return self.scaler
     
     def addRequest(self, request: Request):
         request.setStatus(Status.UNASSIGNED)
@@ -30,32 +33,31 @@ class Balancer:
 
     def clearRequests(self):
         self.requests.clear()
-        return 
-    
-    def addContainer(self, container: Container):
-        # container.setId(len(self.getContainers()))
-        self.containers.append(container)
         return
     
-    def delContainer(self, container: Container):
-        self.containers.remove(container)
+    def addInstance(self, instance):
+        self.instances.append(instance)
         return
     
-    def getContainer(self, i: int):
-        return self.containers[i]
+    def delInstance(self, instance):
+        self.instances.remove(instance)
+        return
     
-    def getContainers(self):
-        return self.containers
+    def getInstance(self, i: int):
+        return self.instances[i]
     
-    def getNumOfContainers(self):
-        return len(self.containers)
+    def getInstances(self):
+        return self.instances
     
-    def clearContainers(self):
-        self.containers.clear()
+    def getNumOfInstances(self):
+        return len(self.instances)
+    
+    def clearInstances(self):
+        self.instances.clear()
         return
 
-    def isContainedContainer(self, container: Container):
-        return container in self.containers
+    def isContainedInstance(self, instance):
+        return instance in self.instances
 
     def runStep(self):
         self.manageQueue()
@@ -63,33 +65,61 @@ class Balancer:
 
     def manageQueue(self):
         for req in self.getRequests():
-            self.tryForward2Container(req)
+            self.tryForward2Instance(req)
         return
     
-    def tryForward2Container(self, req):
-        container = self.chooseContainer()
-        if container:
-            self.forward2Container(container, req)
+    def tryForward2Instance(self, req):
+        instance = self.chooseInstance()
+        if instance:
+            self.forward2Instance(instance, req)
 
-    def chooseContainer(self):
-        # round robin
-        container = None
-        if self.last_Container + 1 < len(self.getContainers()):
-            next_container = self.last_Container + 1
+    def chooseInstance(self):
+        if self.mode == Flg.FLG_CONTAINER:
+            # round robin
+            instance = self.roundRobin()
+        elif self.mode == Flg.FLG_SERVERLESS:
+            # hottest
+            instance = self.hottest()
+            if instance == None:
+                instance = self.coldStart()
         else:
-            next_container = 0
-        container = self.getContainer(next_container)
-        # for container in self.getContainers():
-        #     if container.getQueueLength() == 0:
-        #         return container
-        # return container
-        return container
+            return None
+        return instance
+    
+    def roundRobin(self):
+        instance = None
+        if self.last_instance + 1 < len(self.getInstances()):
+            next_instance = self.last_instance + 1
+        else:
+            next_instance = 0
+        instance = self.getInstance(next_instance)
+        return instance
+    
+    def hottest(self):
+        hottest = None
+        last_time = -1
+        for instance in self.getInstances():
+            if instance.getStatus() == Status.ACTIVE:
+                temp_last = instance.getLastTime()
+                if last_time < temp_last:
+                    last_time = temp_last
+                    hottest = instance
+        return hottest
+    
+    def coldStart(self):
+        instance = None
+        scaler = self.getScaler()
+        instance = scaler.coldStartInstance()
+        return instance
 
-    def forward2Container(self, container: Container, req: Request):
+    def forward2Instance(self, instance: Instance, req: Request):
         self.delRequest(req)
-        req.setProcessedBy("container" + str(container.getId()))
-        container.addRequest(req)
-        self.last_Container = self.getContainers().index(container)
+        if self.mode == Flg.FLG_CONTAINER:
+            req.setProcessedBy("container" + str(instance.getId()))
+        elif self.mode == Flg.FLG_SERVERLESS:
+            req.setProcessedBy("serverless" + str(instance.getId()))
+        instance.addRequest(req)
+        self.last_instance = self.getInstances().index(instance)
         return
 
     def delRequest(self, req:Request):

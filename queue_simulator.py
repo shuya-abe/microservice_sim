@@ -4,7 +4,7 @@ import math
 import time
 from balancer import Balancer
 from request import Request
-from container import Container
+from instance import Instance
 from scaler import Scaler
 from limit import Limit
 from config import Config
@@ -13,18 +13,12 @@ from cluster import Cluster
 from generator import Generator
 from sender import Sender
 from status import Status
+from container import Container
+from serverless import Serverless
 import datetime
 
 class QueueSimulator:
 
-    def __init__(self):
-        return
-
-    # def __init__(self, threshold, limit):
-    #     self.clearAll()
-    #     self.settingSimulate(threshold, limit)
-    #     return
-    
     def __init__(self, threshold, limit, step_per_time = Config.SIM_STEP_PER_TIME):
         self.clearAll()
         self.settingSimulate(threshold, limit, step_per_time)
@@ -47,12 +41,16 @@ class QueueSimulator:
         self.reqs.clear()
         self.list_length.clear()
         self.list_is_process.clear()
+        
+        self.mode = Config.CONFIG_INSTANCE_FLG
 
         self.addCluster(Cluster())
         balancer = Balancer()
         self.cluster.addBalancer(balancer)
-        self.cluster.addScaler(Scaler(balancer))
-        self.createContainers()
+        scaler = Scaler(balancer)
+        self.cluster.addScaler(scaler)
+        balancer.setScaler(scaler)
+        self.createInstances()
 
         generator = Generator(step_per_time)
         self.addGenerator(generator)
@@ -65,8 +63,6 @@ class QueueSimulator:
         self.setStepPerTime(step_per_time)
         self.setStep(0)
 
-        # generator.setNumRequests(0)
-
         if Config.CONFIG_REQUEST_FLG == Flg.FLG_OUTPUT:
             reqs = generator.createAllRequests(limit, threshold)
             generator.outputRequests(Config.CONFIG_REQUEST_FILE)
@@ -74,27 +70,24 @@ class QueueSimulator:
             reqs = generator.inputRequests(Config.CONFIG_REQUEST_FILE)
 
         sender.setRequests(reqs)
-        
-        # time = generator.calculateNextRequest(0, step_per_time)
-        # generator.setNextRequestTime(time)
+
         time = sender.reqs[0].getStartTime()
         sender.setNextRequestTime(time)
         self.next_request_time = time
-        
 
         return
-    
+
     def addGenerator(self, generator):
         self.generator = generator
         return
-    
+
     def getGenerator(self):
         return self.generator
 
     def addSender(self, sender):
         self.sender = sender
         return
-    
+
     def getSender(self):
         return self.sender
 
@@ -118,38 +111,44 @@ class QueueSimulator:
         threshold = self.getThreshold()
         
         if Config.CONFIG_DEFAULT_FLG:
-            outfile = Config.SIM_DEFAULT_SERVER_OUTPUT_FILE + "_num_container.csv"
+            outfile = Config.SIM_DEFAULT_SERVER_OUTPUT_FILE
         else:
-            outfile = Config.SIM_OUTPUT_FILE + "_num_container.csv"
+            outfile = Config.SIM_OUTPUT_FILE
+            
+        if self.mode == Flg.FLG_CONTAINER:
+            outfile += "_num_container.csv"
+        elif self.mode == Flg.FLG_SERVERLESS:
+            outfile += "_num_serverless.csv"
+            
         with open(outfile, 'w', newline='') as f:
             writer = csv.writer(f)
         
             balancer = self.getCluster().getBalancer()
-            before_containers = balancer.getNumOfContainers()
+            before_instances = balancer.getNumOfInstances()
             
             if limit == Limit.LIMIT_DEFAULT:
                 return
             elif limit == Limit.LIMIT_REQUEST:
                 while(threshold > self.countReqs()):
                     self.simulateStep()
-                    num_containers = balancer.getNumOfContainers()
-                    if before_containers != num_containers:
-                        writer.writerow([str(self.getStep()/self.getStepPerTime()), str(self.getStep()), num_containers])
-                        before_containers = num_containers
+                    num_instances = balancer.getNumOfInstances()
+                    if before_instances != num_instances:
+                        writer.writerow([str(self.getStep()/self.getStepPerTime()), str(self.getStep()), num_instances])
+                        before_instances = num_instances
             elif limit == Limit.LIMIT_TIMESTEP:
                 while(threshold > self.getStep() or self.countReqs() < self.sender.countReqs()):
                     self.simulateStep()
-                    num_containers = balancer.getNumOfContainers()
-                    if before_containers != num_containers:
-                        writer.writerow([str(self.getStep()/self.getStepPerTime()), str(self.getStep()), num_containers])
-                        before_containers = num_containers
+                    num_instances = balancer.getNumOfInstances()
+                    if before_instances != num_instances:
+                        writer.writerow([str(self.getStep()/self.getStepPerTime()), str(self.getStep()), num_instances])
+                        before_instances = num_instances
             elif limit == Limit.LIMIT_TIME:
                 while(threshold > self.getTime() or self.countReqs() < self.sender.countReqs()):
                     self.simulateStep()
-                    num_containers = balancer.getNumOfContainers()
-                    if before_containers != num_containers:
-                        writer.writerow([str(self.getStep()/self.getStepPerTime()), str(self.getStep()), num_containers])
-                        before_containers = num_containers
+                    num_instances = balancer.getNumOfInstances()
+                    if before_instances != num_instances:
+                        writer.writerow([str(self.getStep()/self.getStepPerTime()), str(self.getStep()), num_instances])
+                        before_instances = num_instances
             else:
                 return
 
@@ -167,8 +166,8 @@ class QueueSimulator:
         scaler.runStep(step)
         list_length_step = []
         list_is_process_step = []
-        for container in scaler.getContainers():
-            reqs, length, is_process = container.runStep(step)
+        for instance in scaler.getInstances():
+            reqs, length, is_process = instance.runStep(step)
             self.registerReqs(reqs)
             list_length_step.append(length)
             list_is_process_step.append(is_process)
@@ -203,19 +202,19 @@ class QueueSimulator:
         
         print("Threshold: " + str(Config.SIM_THRESHOLD))
         print("Steps / Time: " + str(self.getStepPerTime()))
-        print("Default Container Capacity: " + str(Config.CONFIG_DEFAULT_CAPACITY))
-        print("Default Container CPU: " + str(Config.CONFIG_DEFAULT_num_CPU))
+        print("Default Instance Capacity: " + str(Config.CONFIG_DEFAULT_CAPACITY))
+        print("Default Instance CPU: " + str(Config.CONFIG_DEFAULT_num_CPU))
         if Config.CONFIG_DEFAULT_QUEUE_LENGTH > 0:
             print("Default Queue Length: " + str(Config.CONFIG_DEFAULT_QUEUE_LENGTH))
         else:
             print("Default Queue Length: INF")
         
-        print("--Container Config--")
-        for container in self.getCluster().getContainers():
-            if container.getMaxQueueLength() > 0:
-                print("capacity: %d, num_CPU: %d, queue_length: %d" % (container.getCapacity() * self.step_per_time, container.getNumCPU(), container.getMaxQueueLength()))
+        print("--Instance Config--")
+        for instance in self.getCluster().getInstances():
+            if instance.getMaxQueueLength() > 0:
+                print("capacity: %d, num_CPU: %d, queue_length: %d" % (instance.getCapacity() * self.step_per_time, instance.getNumCPU(), instance.getMaxQueueLength()))
             else:
-                print("capacity: %d, num_CPU: %d, queue_length: INF" % (container.getCapacity() * self.step_per_time, container.getNumCPU()))
+                print("capacity: %d, num_CPU: %d, queue_length: INF" % (instance.getCapacity() * self.step_per_time, instance.getNumCPU()))
         
     def calcTotalTime(self, flg):
         if flg == Flg.FLG_VERBOSE:
@@ -237,9 +236,15 @@ class QueueSimulator:
         total_wait = 0.
         # print("---PACKET---")
         if Config.CONFIG_DEFAULT_FLG:
-            outfile = Config.SIM_DEFAULT_SERVER_OUTPUT_FILE + "_container"
+            outfile = Config.SIM_DEFAULT_SERVER_OUTPUT_FILE
         else:
-            outfile = Config.SIM_OUTPUT_FILE + "_container"
+            outfile = Config.SIM_OUTPUT_FILE
+            
+        if self.mode == Flg.FLG_CONTAINER:
+            outfile += "_container.csv"
+        elif self.mode == Flg.FLG_SERVERLESS:
+            outfile += "_serverless.csv"
+            
         with open(outfile + "_packet.csv", 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(["id", "processedBy", "workload", "start", "end", "time_lifetime", "time_wait", "time_service"])
@@ -249,7 +254,6 @@ class QueueSimulator:
                 writer.writerow([id, processedBy, workload, start, end, time_lifetime, time_wait, time_lifetime - time_wait])
                 total += time_lifetime
                 total_wait += time_wait
-                # print("ID: %d, WORKLOAD: %d, LIFETIMESTEP: %d -> %d: %d" % (id, workload, start, end, time_lifetime))
         return total, total_wait
 
     def calcResultPacket(self, req):
@@ -264,19 +268,18 @@ class QueueSimulator:
 
     def outputResult(self, total, total_wait):
         balancer = self.cluster.getBalancer()
-        # ideal_rho, ideal_time_wait, ideal_time_service, ideal_time_total = self.calcIdealResult()
 
         count_is_process = 0.
         for is_process_step in self.list_is_process:
-            for is_process_container in is_process_step:
-                if is_process_container:
+            for is_process_instance in is_process_step:
+                if is_process_instance:
                     count_is_process += 1
 
         num_reqs = len(self.reqs)
         num_steps = self.getStep()
         total_time = self.getTime()
         ex_time_service = (total - total_wait) / num_reqs
-        ex_rho = count_is_process / (num_steps * len(balancer.getContainers()))
+        ex_rho = count_is_process / (num_steps * len(balancer.getInstances()))
         ex_time_wait = total_wait/num_reqs
         ex_time_total = total/num_reqs
 
@@ -295,11 +298,8 @@ class QueueSimulator:
 
         with open(Config.SIM_DEFAULT_OUTPUT_FILE, 'a', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow([datetime.datetime.now(), Config.CONFIG_REQUEST_FILE, len(self.cluster.getContainers()), Config.CONFIG_DEFAULT_CAPACITY, Config.CONFIG_DEFAULT_num_CPU, self.step_per_time, total_time, num_steps, num_reqs, ex_rho, ex_time_service, ex_time_wait, ex_time_total])
+            writer.writerow([datetime.datetime.now(), Config.CONFIG_REQUEST_FILE, len(self.cluster.getInstances()), Config.CONFIG_DEFAULT_CAPACITY, Config.CONFIG_DEFAULT_num_CPU, self.step_per_time, total_time, num_steps, num_reqs, ex_rho, ex_time_service, ex_time_wait, ex_time_total])
 
-        # datetime,lambda,mu,servers,step_per_time,total_time,num_steps,num_reqs, ex_rho, ex_time_service, ex_time_wait, ex_time_total
-        
-        # return [total_time, num_steps, num_reqs, ideal_rho, ex_rho, ideal_time_service, ex_time_service, ideal_time_wait, ex_time_wait, ideal_time_total, ex_time_total]
         return [total_time, num_steps, num_reqs, ex_rho, ex_time_service, ex_time_wait, ex_time_total]
     
     def registerReqs(self, reqs):
@@ -335,11 +335,14 @@ class QueueSimulator:
     def getNumRequests(self):
         return self.num_requests
     
-    def createContainer(self, capacity = Config.CONFIG_DEFAULT_CAPACITY, num_CPU = Config.CONFIG_DEFAULT_num_CPU, queue_length = Config.CONFIG_DEFAULT_QUEUE_LENGTH, status = Config.CONFIG_DEFAULT_STATUS):
-        container = Container(capacity, num_CPU, queue_length, status)
-        return container
+    def createInstance(self, capacity = Config.CONFIG_DEFAULT_CAPACITY, num_CPU = Config.CONFIG_DEFAULT_num_CPU, queue_length = Config.CONFIG_DEFAULT_QUEUE_LENGTH, status = Config.CONFIG_DEFAULT_STATUS):
+        if self.mode == Flg.FLG_CONTAINER:
+            instance = Container(capacity, num_CPU, queue_length, status)
+        elif self.mode == Flg.FLG_SERVERLESS:
+            instance = Serverless(capacity, num_CPU, queue_length, status)
+        return instance
     
-    def createContainers(self):
+    def createInstances(self):
         cluster = self.getCluster()
 
         if Config.CONFIG_DEFAULT_FLG == True:
@@ -350,21 +353,24 @@ class QueueSimulator:
             queue_length = Config.CONFIG_DEFAULT_QUEUE_LENGTH
             status = Config.CONFIG_DEFAULT_STATUS
             
-            container = self.createContainer(capacity, num_CPU, queue_length, Status.ACTIVE)
-            container.setId(0)
-            cluster.addContainer(container)
-            cluster.registerContainer2Scaler(container)
+            start = 0
+            if self.mode == Flg.FLG_CONTAINER:
+                instance = self.createInstance(capacity, num_CPU, queue_length, Status.ACTIVE)
+                instance.setId(0)
+                cluster.addInstance(instance)
+                cluster.registerInstance2Scaler(instance)
+                start += 1
             
-            for i in range(1,Config.CONFIG_DEFAULT_NUM):
-                container = self.createContainer(capacity, num_CPU, queue_length, status)
-                container.setId(i)
-                cluster.addContainer(container)
-                cluster.registerContainer2Scaler(container)
+            for i in range(start,Config.CONFIG_DEFAULT_NUM):
+                instance = self.createInstance(capacity, num_CPU, queue_length, status)
+                instance.setId(i)
+                cluster.addInstance(instance)
+                cluster.registerInstance2Scaler(instance)
         else:
-            for i, container_conf in enumerate(Config.CONFIG_CONTAINERS):
-                capacity, num_CPU, queue_length, status = container_conf
-                container = self.createContainer(capacity, num_CPU, queue_length, status)
-                container.setId(i)
-                cluster.addContainer(container)
-                cluster.registerContainer2Scaler(container)
+            for i, instance_conf in enumerate(Config.CONFIG_INSTANCES):
+                capacity, num_CPU, queue_length, status = instance_conf
+                instance = self.createInstance(capacity, num_CPU, queue_length, status)
+                instance.setId(i)
+                cluster.addInstance(instance)
+                cluster.registerInstance2Scaler(instance)
         return
