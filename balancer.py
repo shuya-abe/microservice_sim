@@ -99,7 +99,7 @@ class Balancer:
         hottest = None
         last_time = -1
         for instance in self.getInstances():
-            if instance.getStatus() == Status.ACTIVE:
+            if instance.getStatus() == Status.ACTIVE and instance.getQueueLength() == 0:
                 temp_last = instance.getLastTime()
                 if last_time < temp_last:
                     last_time = temp_last

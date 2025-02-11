@@ -36,11 +36,11 @@ class Cluster:
         num_cpu = instance.getNumCPU() + self.getActiveCPU()
         if num_cpu > self.getMaxCPU():
             print("ERROR: shortage CPU")
-            return
+            return False
         else:
             self.instances.append(instance)
             self.setActiveCPU(num_cpu) 
-        return
+        return True
 
     def getInstances(self):
         return self.instances

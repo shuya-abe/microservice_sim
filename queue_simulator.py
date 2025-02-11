@@ -364,13 +364,16 @@ class QueueSimulator:
             for i in range(start,Config.CONFIG_DEFAULT_NUM):
                 instance = self.createInstance(capacity, num_CPU, queue_length, status)
                 instance.setId(i)
-                cluster.addInstance(instance)
+                if not cluster.addInstance(instance):
+                    break
                 cluster.registerInstance2Scaler(instance)
+
         else:
             for i, instance_conf in enumerate(Config.CONFIG_INSTANCES):
                 capacity, num_CPU, queue_length, status = instance_conf
                 instance = self.createInstance(capacity, num_CPU, queue_length, status)
                 instance.setId(i)
-                cluster.addInstance(instance)
+                if not cluster.addInstance(instance):
+                    break
                 cluster.registerInstance2Scaler(instance)
         return
