@@ -122,10 +122,10 @@ class QueueSimulator:
             while(threshold > self.countReqs()):
                 self.simulateStep()
         elif limit == Limit.LIMIT_TIMESTEP:
-            while(threshold > self.getStep()):
+            while(threshold > self.getStep() or self.countReqs() < self.sender.countReqs()):
                 self.simulateStep()
         elif limit == Limit.LIMIT_TIME:
-           while(threshold > self.getTime()):
+           while(threshold > self.getTime() or self.countReqs() < self.sender.countReqs()):
                 self.simulateStep()
         else:
             return
@@ -138,14 +138,7 @@ class QueueSimulator:
         balancer = cluster.getBalancer()
         scaler = cluster.getScaler()
         step = self.getStep()
-        # while self.getNextRequestStep() == self.getStep():
-        #     id = self.getNumRequests()
-        #     workload = self.calculateWorkload4Request()
-        #     request = self.createRequest(id, workload, self.getStep())
-        #     cluster.addRequest(request)
-        #     self.incrementNumRequest()
-        #     time_next = self.calculateNextRequest()
-        #     self.setNextRequestTime(time_next)
+        
         sender.runStep(cluster, step, self.step_per_time)
         balancer.runStep()
         scaler.runStep(step)
@@ -284,47 +277,6 @@ class QueueSimulator:
         
         # return [total_time, num_steps, num_reqs, ideal_rho, ex_rho, ideal_time_service, ex_time_service, ideal_time_wait, ex_time_wait, ideal_time_total, ex_time_total]
         return [total_time, num_steps, num_reqs, ex_rho, ex_time_service, ex_time_wait, ex_time_total]
-
-    # def calcIdealResult(self):
-        # balancer = self.cluster.getBalancer()
-
-        # # サーバ利用率 (ρ)
-        # lmbda = Config.CONFIG_LAMBDA
-        # mu = Config.CONFIG_MU
-        # s = len(balancer.getContainers())
-        # rho = lmbda / (s * mu)
-        
-        # # システムが安定しているかどうかの確認
-        # if rho >= 1:
-        #     return "The cluster is unstable. Please check the input values."
-        
-        # # 平均待機人数 (Lq)
-        # p0 = 1 / (sum([(lmbda / mu) ** n / math.factorial(n) for n in range(s)]) + 
-        #         (lmbda / mu) ** s / (math.factorial(s) * (1 - rho)))
-        # Lq = p0 * ((lmbda / mu) ** s * rho) / (math.factorial(s) * (1 - rho) ** 2)
-        
-        # # 平均システム内人数 (L)
-        # L = Lq + (lmbda / mu)
-        
-        # # 平均キュー内時間 (Wq)
-        # Wq = Lq / lmbda
-        
-        # # 平均サービス時間 (W)
-        # W = L / lmbda
-        
-        # # 平均システム内時間 (Ws)
-        # Ws = Wq + 1/mu
-        
-        # # {
-        # #         'Container Utilization (ρ)': rho,
-        # #         'Average Number of Customers in Queue (Lq)': Lq,
-        # #         'Average Time in Queue (Wq)': Wq,
-        # #         'Average Service Time (1/mu)': 1/mu,
-        # #         'Average Time in Cluster (Ws)': Ws
-        # #     }
-
-        # return rho, Wq, 1/mu, Ws
-    
     
     def registerReqs(self, reqs):
         self.reqs.extend(reqs)
@@ -337,15 +289,6 @@ class QueueSimulator:
     
     def getLimit(self):
         return self.limit
-    
-    # def setNumRequest(self, num):
-    #     self.num_requests = num
-    
-    # def getNumRequests(self):
-    #     return self.num_requests
-    
-    # def incrementNumRequest(self):
-    #     self.num_requests += 1
     
     def setThreshold(self, threshold):
         self.threshold = threshold
@@ -401,22 +344,3 @@ class QueueSimulator:
                 cluster.addContainer(container)
                 cluster.registerContainer2Scaler(container)
         return
-
-    # def createRequest(self, id, workload, time):
-    #     request = Request(id, workload, time)
-    #     return request
-    
-    # def calculateNextRequest(self):
-    #     scale = 1./Config.CONFIG_LAMBDA
-    #     # step = max([1, math.ceil(rd.exponential(scale))])
-    #     step = math.ceil(rd.exponential(scale) * self.getStepPerTime())
-    #     # step = round(rd.exponential(scale))
-    #     # step = math.floor(rd.exponential(scale))
-    #     time = self.getStep()
-    #     return time + step
-    
-    # def calculateWorkload4Request(self):
-    #     scale = 1./Config.CONFIG_MU
-    #     service_time = rd.exponential(scale) * self.getStepPerTime()
-    #     workload = Config.CONFIG_DEFAULT_CAPACITY * service_time
-    #     return workload

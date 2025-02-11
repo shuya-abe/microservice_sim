@@ -149,9 +149,6 @@ class Container:
             print("COMPLETE SCALE IN: " + str(self.getId()))
         return
     
-    def stopContainer(self):
-        self.de
-    
     def runStep(self, time):
         status = self.getStatus()
         if status == Status.ACTIVE or status == Status.WORKING:
