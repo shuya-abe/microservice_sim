@@ -44,6 +44,9 @@ class Cluster:
 
     def getContainers(self):
         return self.containers
+    
+    def getNumOfContainers(self):
+        return len(self.containers)
 
     def addScaler(self, scaler):
         self.scaler = scaler

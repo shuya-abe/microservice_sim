@@ -47,6 +47,9 @@ class Balancer:
     def getContainers(self):
         return self.containers
     
+    def getNumOfContainers(self):
+        return len(self.containers)
+    
     def clearContainers(self):
         self.containers.clear()
         return

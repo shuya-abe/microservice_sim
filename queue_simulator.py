@@ -116,19 +116,42 @@ class QueueSimulator:
         self.sim_timer = time.time()
         limit = self.getLimit()
         threshold = self.getThreshold()
-        if limit == Limit.LIMIT_DEFAULT:
-            return
-        elif limit == Limit.LIMIT_REQUEST:
-            while(threshold > self.countReqs()):
-                self.simulateStep()
-        elif limit == Limit.LIMIT_TIMESTEP:
-            while(threshold > self.getStep() or self.countReqs() < self.sender.countReqs()):
-                self.simulateStep()
-        elif limit == Limit.LIMIT_TIME:
-           while(threshold > self.getTime() or self.countReqs() < self.sender.countReqs()):
-                self.simulateStep()
+        
+        if Config.CONFIG_DEFAULT_FLG:
+            outfile = Config.SIM_DEFAULT_SERVER_OUTPUT_FILE + "_num_container.csv"
         else:
-            return
+            outfile = Config.SIM_OUTPUT_FILE + "_num_container.csv"
+        with open(outfile, 'w', newline='') as f:
+            writer = csv.writer(f)
+        
+            balancer = self.getCluster().getBalancer()
+            before_containers = balancer.getNumOfContainers()
+            
+            if limit == Limit.LIMIT_DEFAULT:
+                return
+            elif limit == Limit.LIMIT_REQUEST:
+                while(threshold > self.countReqs()):
+                    self.simulateStep()
+                    num_containers = balancer.getNumOfContainers()
+                    if before_containers != num_containers:
+                        writer.writerow([str(self.getStep()/self.getStepPerTime()), str(self.getStep()), num_containers])
+                        before_containers = num_containers
+            elif limit == Limit.LIMIT_TIMESTEP:
+                while(threshold > self.getStep() or self.countReqs() < self.sender.countReqs()):
+                    self.simulateStep()
+                    num_containers = balancer.getNumOfContainers()
+                    if before_containers != num_containers:
+                        writer.writerow([str(self.getStep()/self.getStepPerTime()), str(self.getStep()), num_containers])
+                        before_containers = num_containers
+            elif limit == Limit.LIMIT_TIME:
+                while(threshold > self.getTime() or self.countReqs() < self.sender.countReqs()):
+                    self.simulateStep()
+                    num_containers = balancer.getNumOfContainers()
+                    if before_containers != num_containers:
+                        writer.writerow([str(self.getStep()/self.getStepPerTime()), str(self.getStep()), num_containers])
+                        before_containers = num_containers
+            else:
+                return
 
         return
     
@@ -152,6 +175,7 @@ class QueueSimulator:
         self.list_length.append(list_length_step)
         self.list_is_process.append(list_is_process_step)
         self.incrementStep()
+        
         return
     
     def endSimulate(self, flg):

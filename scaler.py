@@ -41,12 +41,6 @@ class Scaler:
     def getContainers(self):
         return self.containers
     
-    # def activateContainer(self, container):
-    #     return
-    
-    # def inactivateContainer(self, container):
-    #     return
-    
     def registerContainer2Balancer(self, container):
         self.getBalancer().addContainer(container)
         return
@@ -55,12 +49,6 @@ class Scaler:
         self.getBalancer().delContainer(container)
         return
     
-    # def calculateTargetNumOfContainers(self):
-    #     return
-    
-    # def calculateAverageUtilization(self):
-    #     return
-        
     def scaleOut(self, metrics):
         ideal_num_container = math.ceil(self.num_active_container * metrics)
         num_active_container = self.num_active_container
