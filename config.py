@@ -4,24 +4,24 @@ from status import Status
 import datetime
 
 class Config:
+    date = datetime.datetime.now().strftime('%Y%m%d_%H%M_')
+
+    ### SIMULATOR ###
     SIM_THRESHOLD = 10000
     SIM_STEP_PER_TIME = 10
     # SIM_LIMIT = Limit.LIMIT_REQUEST
     SIM_LIMIT = Limit.LIMIT_TIME
-    # SIM_FLG = Flg.FLG_DEFAULT
-    SIM_FLG = Flg.FLG_VERBOSE
 
+    ### CLUSTER ###
     CONFIG_CLUSTER_CPU = 1000
 
-    date = datetime.datetime.now().strftime('%Y%m%d_%H%M_')
-
+    ### GENERATOR & SENDER ###
     # λ(ラムダ):客の平均到着率[人/時]⇔1/λ:客の平均到着間隔[時/人]
     # μ(ミュー):一つの窓口の平均サービス率[人/時]⇔1/μ:窓口の平均サービス時間[時/人]
     CONFIG_LAMBDA = 1
     CONFIG_MU = 1 / 10
 
     CONFIG_REQUEST_FLG = Flg.FLG_INPUT
-    
     if (SIM_LIMIT == Limit.LIMIT_TIME):
         CONFIG_REQUEST_FILE = "./requests/" + str(SIM_THRESHOLD) + "sec" + "_lambda" + str(CONFIG_LAMBDA) + "_mu" + str(CONFIG_MU) + ".csv"
     elif (SIM_LIMIT == Limit.LIMIT_TIMESTEP):
@@ -30,20 +30,22 @@ class Config:
         CONFIG_REQUEST_FILE = "./requests/" + str(SIM_THRESHOLD) + "reqs" + "_lambda" + str(CONFIG_LAMBDA) + "_mu" + str(CONFIG_MU) + ".csv"
     else:
         CONFIG_REQUEST_FILE = "./requests/" + str(SIM_THRESHOLD) + "sec" + "_lambda" + str(CONFIG_LAMBDA) + "_mu" + str(CONFIG_MU) + ".csv"
-    
+
+    ### SCALER ###
     CONFIG_SCALE_SENSITIVE = 0.1
     CONFIG_SCALE_INTERVAL = 60
     CONFIG_SCALE_TARGET = 0.6
+    
+    ### CONTAINER ###
+    CONFIG_DEFAULT_FLG = True
+    CONFIG_DEFAULT_NUM = 1
     CONFIG_DEFAULT_SETUPTIME = 1
     CONFIG_DEFAULT_SHUTDOWNTIME = 1
-
+    
     CONFIG_DEFAULT_CAPACITY = 100
     CONFIG_DEFAULT_num_CPU = 1
     CONFIG_DEFAULT_QUEUE_LENGTH = -1
     CONFIG_DEFAULT_STATUS = Status.INACTIVE
-
-    CONFIG_DEFAULT_FLG = True
-    CONFIG_DEFAULT_NUM = 1
 
     CONFIG_CONTAINERS = [
         (CONFIG_DEFAULT_CAPACITY, CONFIG_DEFAULT_num_CPU, CONFIG_DEFAULT_QUEUE_LENGTH, Status.ACTIVE),
@@ -57,6 +59,10 @@ class Config:
         (CONFIG_DEFAULT_CAPACITY, CONFIG_DEFAULT_num_CPU, CONFIG_DEFAULT_QUEUE_LENGTH, Status.INACTIVE),
         (CONFIG_DEFAULT_CAPACITY, CONFIG_DEFAULT_num_CPU, CONFIG_DEFAULT_QUEUE_LENGTH, Status.INACTIVE)
     ]
+    
+    ### OUTPUT ###
+    # SIM_FLG = Flg.FLG_DEFAULT
+    SIM_FLG = Flg.FLG_VERBOSE
 
     SIM_DEFAULT_OUTPUT_FILE = "./result/result.csv"
     SIM_DEFAULT_SERVER_OUTPUT_FILE = "./result/" + str(date) + str(CONFIG_DEFAULT_NUM) + "srv_" + str(CONFIG_DEFAULT_num_CPU) + "CPU_" + str(SIM_THRESHOLD) + "step_lambda" + str(CONFIG_LAMBDA) + "_mu" + str(CONFIG_MU) + "_" + str(date)
