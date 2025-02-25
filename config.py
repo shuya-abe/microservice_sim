@@ -16,9 +16,7 @@ class Config:
     CONFIG_CLUSTER_CPU = 100
 
     ### GENERATOR & SENDER ###
-    # λ(ラムダ):客の平均到着率[人/時]⇔1/λ:客の平均到着間隔[時/人]
-    # μ(ミュー):一つの窓口の平均サービス率[人/時]⇔1/μ:窓口の平均サービス時間[時/人]
-    CONFIG_LAMBDA = 1 * 10
+    CONFIG_LAMBDA = 1
     CONFIG_MU = 1 / 10
 
     CONFIG_REQUEST_FLG = Flg.FLG_INPUT

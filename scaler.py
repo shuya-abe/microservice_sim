@@ -82,6 +82,7 @@ class Scaler:
                 instance.activateInstance()
                 self.registerInstance2Balancer(instance)
                 return instance
+        return None
     
     def scaleIn(self, metrics):
         ideal_num_instance = max(1, math.ceil(self.num_active_instance * metrics))
@@ -99,7 +100,7 @@ class Scaler:
     
     def deactivateOldInstance(self, instance):
         status = instance.getStatus()
-        if (status == Status.WORKING or status == Status.ACTIVE) and instance.deactivatetimer < 0:
+        if status == Status.ACTIVE:
             print("deactivate Old Instance")
             instance.deactivateInstance()
             self.removeInstanceFromBalancer(instance)
