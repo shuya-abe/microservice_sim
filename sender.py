@@ -22,7 +22,9 @@ class Sender:
             # self.incrementNumRequest()
             # time_next = self.calculateNextRequest(step, step_per_time)
             # self.setNextRequestTime(time_next)
-            cluster.addRequest(self.reqs[self.request_ptr])
+            req = self.reqs[self.request_ptr]
+            # req.setStartTime(step/step_per_time)
+            cluster.addRequest(req)
             # self.incrementNumRequest()
             self.request_ptr += 1
         return
@@ -34,7 +36,10 @@ class Sender:
         self.reqs.append(request)
         return
     
-    def setRequests(self, reqs):
+    def setRequests(self, reqs, step_per_time):
+        for req in reqs:
+            req.setStartTime(math.ceil(req.getStartTime()*step_per_time) / step_per_time)
+        
         self.reqs.extend(reqs)
 
     def getNumRequests(self):

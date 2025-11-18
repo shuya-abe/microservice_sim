@@ -4,8 +4,8 @@ from status import Status
 from config import Config
 
 class Serverless(Instance):
-    def __init__(self, capacity = Config.CONFIG_DEFAULT_CAPACITY, num_CPU = Config.CONFIG_DEFAULT_num_CPU, queue_length = Config.CONFIG_DEFAULT_QUEUE_LENGTH, status = Config.CONFIG_DEFAULT_STATUS):
-        super().__init__(capacity, num_CPU, queue_length, status)
+    def __init__(self, capacity, num_CPU, queue_length, status, config:Config):
+        super().__init__(capacity, num_CPU, queue_length, status, config)
         self.last_time = -1
         return
     
@@ -16,16 +16,16 @@ class Serverless(Instance):
         self.last_time = time
         
     def activateInstance(self):
-        self.setuptimer = Config.CONFIG_DEFAULT_SETUPTIME * Config.SIM_STEP_PER_TIME
+        self.setuptimer = self.config.CONFIG_DEFAULT_SETUPTIME * self.config.SIM_STEP_PER_TIME + 1
         self.setStatus(Status.SETUP)
-        print("START SCALE OUT")
+        # print("START SCALE OUT")
         return
     
     def setupInstance(self):
         self.setuptimer -= 1
         if self.setuptimer <= 0:
             self.setStatus(Status.ACTIVE)
-            print("COMPLETE SCALE OUT: " + str(self.getId()))
+            # print("COMPLETE SCALE OUT: " + str(self.getId()))
         return
 
     def processRequest(self, req:Request, time):
@@ -33,19 +33,20 @@ class Serverless(Instance):
         if workload > 0:
             if req.getStatus() != Status.PROCESSING:
                 req.setStatus(Status.PROCESSING)
-                req.setStartProcessTime(time / Config.SIM_STEP_PER_TIME)
+                req.setStartProcessTime(time / self.config.SIM_STEP_PER_TIME)
             workload -= self.processing_capacity
             req.setWorkload(workload)
-            if workload <= 0:
-                req.setStatus(Status.FINISHED)
-                req.setEndTime(time / Config.SIM_STEP_PER_TIME)
-                self.delRequest(req)
-                self.setLastTime(time)
-                return req
+            # if workload <= 0:
+            #     req.setStatus(Status.FINISHED)
+            #     req.setEndTime(time / Config.SIM_STEP_PER_TIME)
+            #     self.delRequest(req)
+            #     self.setLastTime(time)
+            #     return req
+            self.setLastTime(time)
         else:
             req.setStatus(Status.FINISHED)
-            req.setEndTime(time / Config.SIM_STEP_PER_TIME)
-            self.delRequest(req)
+            req.setEndTime(time / self.config.SIM_STEP_PER_TIME)
+            # self.delRequest(req)
             self.setLastTime(time)
             return req
         return None

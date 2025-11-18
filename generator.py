@@ -7,9 +7,12 @@ import csv
 
 class Generator:
 
-    def __init__(self, step_per_time):
+    def __init__(self, step_per_time, _lambda, mu, config:Config):
+        self.config = config
         self.reqs = []
         self.step_per_time = step_per_time
+        self._lambda = _lambda
+        self.mu = mu
         # self.next_request_time = -1
         # self.request_ptr = 0
         return
@@ -87,7 +90,7 @@ class Generator:
     #     return self.reqs[self.request_ptr].getStartTime()
     
     def calculateNextRequest(self, time, step_per_time):
-        scale = 1./Config.CONFIG_LAMBDA
+        scale = 1./self._lambda
         # step = max([1, math.ceil(rd.exponential(scale))])
         # step = math.ceil(rd.exponential(scale) * step_per_time)
         step = math.ceil(rd.exponential(scale) * step_per_time)
@@ -96,7 +99,7 @@ class Generator:
         return time + step / step_per_time
     
     def calculateWorkload4Request(self, step_per_time):
-        scale = 1./Config.CONFIG_MU
+        scale = 1./self.mu
         service_time = rd.exponential(scale)
-        workload = Config.CONFIG_DEFAULT_CAPACITY * service_time
+        workload = self.config.CONFIG_DEFAULT_CAPACITY * service_time
         return workload

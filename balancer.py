@@ -6,11 +6,12 @@ from sim_flg import Flg
 
 class Balancer:
 
-    def __init__(self):
+    def __init__(self, config):
+        self.config = config
         self.instances: list[Instance] = []
         self.requests: list[Request] = []
         self.last_instance = -1
-        self.mode = Config.CONFIG_INSTANCE_FLG
+        self.mode = self.config.CONFIG_INSTANCE_FLG
         self.scaler = None
         return
     
@@ -64,19 +65,33 @@ class Balancer:
         return
 
     def manageQueue(self):
-        for req in self.getRequests():
-            self.tryForward2Instance(req)
+        del_reqs = []
+        reqs = self.getRequests()
+        for req in reqs:
+            if self.tryForward2Instance(req) != None:
+                del_reqs.append(req)
+        for req in del_reqs:
+            reqs.remove(req)
         return
     
     def tryForward2Instance(self, req):
         instance = self.chooseInstance()
         if instance:
-            self.forward2Instance(instance, req)
+            return self.forward2Instance(instance, req)
+        else:
+            return None
 
     def chooseInstance(self):
         if self.mode == Flg.FLG_CONTAINER:
             # round robin
             instance = self.roundRobin()
+            
+            # 0916 balancer with queue
+            # for instance in self.getInstances():
+            #     if (instance.getStatus() == Status.ACTIVE or instance.getStatus() == Status.WORKING) and instance.getQueueLength() == 0:
+            #         return instance
+            # return None
+
         elif self.mode == Flg.FLG_SERVERLESS:
             # hottest
             instance = self.hottest()
@@ -93,6 +108,7 @@ class Balancer:
         else:
             next_instance = 0
         instance = self.getInstance(next_instance)
+
         return instance
     
     def hottest(self):
@@ -113,14 +129,14 @@ class Balancer:
         return instance
 
     def forward2Instance(self, instance: Instance, req: Request):
-        self.delRequest(req)
+        # self.delRequest(req)
         if self.mode == Flg.FLG_CONTAINER:
             req.setProcessedBy("container" + str(instance.getId()))
         elif self.mode == Flg.FLG_SERVERLESS:
             req.setProcessedBy("serverless" + str(instance.getId()))
         instance.addRequest(req)
         self.last_instance = self.getInstances().index(instance)
-        return
+        return req
 
     def delRequest(self, req:Request):
         self.requests.remove(req)

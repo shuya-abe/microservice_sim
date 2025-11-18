@@ -8,11 +8,12 @@ from status import Status
 
 class Cluster:
 
-    def __init__(self):
+    def __init__(self, config):
+        self.config = config
         self.balancer = None
         self.instances = []
         self.scaler = None
-        self.num_CPU = Config.CONFIG_CLUSTER_CPU
+        self.num_CPU = self.config.CONFIG_CLUSTER_CPU
         self.num_active_CPU = 0
         return
 
