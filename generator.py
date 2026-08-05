@@ -20,7 +20,7 @@ class Generator:
     def outputRequests(self, outputfile):
         with open(outputfile, 'w', newline='') as f:
             writer = csv.writer(f)
-            # writer.writerow(["id", "workload", "time"])
+            writer.writerow(["id", "workload", "start"])
             for req in self.reqs:
                 id = req.getId()
                 workload = req.getOrgWorkload()
@@ -30,11 +30,18 @@ class Generator:
 
     def inputRequests(self, inputfile):
         with open(inputfile, 'r', newline='') as f:
-            reader = csv.reader(f)
+            sanitized_lines = (line.replace('\0', '') for line in f)
+            reader = csv.reader(sanitized_lines)
             for row in reader:
-                id = int(row[0])
-                workload = float(row[1])
-                time = float(row[2])
+                if len(row) < 3:
+                    continue
+                try:
+                    id = int(row[0])
+                    workload = float(row[1])
+                    time = float(row[2])
+                except ValueError:
+                    # Skip optional header row such as: id,workload,start
+                    continue
                 request = self.createRequest(id, workload, time)
                 self.reqs.append(request)
         return self.reqs
@@ -93,7 +100,7 @@ class Generator:
         scale = 1./self._lambda
         # step = max([1, math.ceil(rd.exponential(scale))])
         # step = math.ceil(rd.exponential(scale) * step_per_time)
-        step = math.ceil(rd.exponential(scale) * step_per_time)
+        step = math.floor(rd.exponential(scale) * step_per_time)
         # step = round(rd.exponential(scale))
         # step = math.floor(rd.exponential(scale))
         return time + step / step_per_time

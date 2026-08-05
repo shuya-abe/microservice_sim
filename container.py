@@ -25,21 +25,21 @@ class Container(Instance):
         return
 
     def processRequest(self, req:Request, time):
-        workload = req.getWorkload()
+        workload = req.workload
         if workload > 0:
-            if req.getStatus() != Status.PROCESSING:
-                req.setStatus(Status.PROCESSING)
-                req.setStartProcessTime(time / self.config.SIM_STEP_PER_TIME)
+            if req.status != Status.PROCESSING:
+                req.status = Status.PROCESSING
+                req.time_start_process = time / self.config.SIM_STEP_PER_TIME
             workload -= self.processing_capacity
-            req.setWorkload(workload)
+            req.workload = workload
             # if workload <= 0:
             #     req.setStatus(Status.FINISHED)
             #     req.setEndTime(time / self.config.SIM_STEP_PER_TIME)
             #     self.delRequest(req)
             #     return req
         else:
-            req.setStatus(Status.FINISHED)
-            req.setEndTime(time / self.config.SIM_STEP_PER_TIME)
+            req.status = Status.FINISHED
+            req.time_end = time / self.config.SIM_STEP_PER_TIME
             # self.delRequest(req)
             return req
         return None

@@ -1,6 +1,16 @@
 from status import Status
 
 class Request:
+    __slots__ = (
+        "id",
+        "org_workload",
+        "workload",
+        "time_start",
+        "time_start_process",
+        "time_end",
+        "status",
+        "processedBy",
+    )
     # id = -1
     # org_workload = -1
     # workload = -1
@@ -10,7 +20,6 @@ class Request:
     # status = Status.DEFAULT
 
     def __init__(self, id, workload, time):
-        self.clearAll()
         self.setId(id)
         self.org_workload = workload
         self.setWorkload(workload)

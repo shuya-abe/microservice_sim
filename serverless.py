@@ -15,7 +15,7 @@ class Serverless(Instance):
     def setLastTime(self, time):
         self.last_time = time
         
-    def activateInstance(self):
+    def activateInstance(self, scaler):
         self.setuptimer = self.config.CONFIG_DEFAULT_SETUPTIME * self.config.SIM_STEP_PER_TIME + 1
         self.setStatus(Status.SETUP)
         # print("START SCALE OUT")
@@ -29,13 +29,13 @@ class Serverless(Instance):
         return
 
     def processRequest(self, req:Request, time):
-        workload = req.getWorkload()
+        workload = req.workload
         if workload > 0:
-            if req.getStatus() != Status.PROCESSING:
-                req.setStatus(Status.PROCESSING)
-                req.setStartProcessTime(time / self.config.SIM_STEP_PER_TIME)
+            if req.status != Status.PROCESSING:
+                req.status = Status.PROCESSING
+                req.time_start_process = time / self.config.SIM_STEP_PER_TIME
             workload -= self.processing_capacity
-            req.setWorkload(workload)
+            req.workload = workload
             # if workload <= 0:
             #     req.setStatus(Status.FINISHED)
             #     req.setEndTime(time / Config.SIM_STEP_PER_TIME)
@@ -44,8 +44,8 @@ class Serverless(Instance):
             #     return req
             self.setLastTime(time)
         else:
-            req.setStatus(Status.FINISHED)
-            req.setEndTime(time / self.config.SIM_STEP_PER_TIME)
+            req.status = Status.FINISHED
+            req.time_end = time / self.config.SIM_STEP_PER_TIME
             # self.delRequest(req)
             self.setLastTime(time)
             return req

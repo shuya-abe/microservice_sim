@@ -9,6 +9,8 @@ class Scaler:
         self.config = config
         self.setBalancer(balancer)
         self.instances = []
+        self.runnable_instances = []
+        self.runnable_instance_set = set()
         self.num_active_instance = 0
         self.mode = self.config.CONFIG_INSTANCE_FLG
         return
@@ -34,7 +36,7 @@ class Scaler:
         return
     
     def runStep4Serverless(self, timestep):
-        for instance in self.getInstances():
+        for instance in self.getRunnableInstances():
             if instance.getStatus() == Status.ACTIVE:
                 if timestep - instance.getLastTime() >= self.config.CONFIG_SERVERLESS_TIMER * self.config.SIM_STEP_PER_TIME:
                     self.deactivateOldInstance(instance)
@@ -48,6 +50,9 @@ class Scaler:
     
     def addInstance(self, instance):
         self.instances.append(instance)
+        instance.setStatusManager(self)
+        if instance.getStatus() != Status.INACTIVE:
+            self.registerRunnableInstance(instance)
         if instance.getStatus() == Status.ACTIVE:
             self.num_active_instance += 1
             self.registerInstance2Balancer(instance)
@@ -55,6 +60,21 @@ class Scaler:
     
     def getInstances(self):
         return self.instances
+
+    def getRunnableInstances(self):
+        return self.runnable_instances
+
+    def registerRunnableInstance(self, instance):
+        if instance not in self.runnable_instance_set:
+            self.runnable_instances.append(instance)
+            self.runnable_instance_set.add(instance)
+        return
+
+    def removeRunnableInstance(self, instance):
+        if instance in self.runnable_instance_set:
+            self.runnable_instance_set.remove(instance)
+            self.runnable_instances.remove(instance)
+        return
     
     def registerInstance2Balancer(self, instance):
         self.getBalancer().addInstance(instance)
@@ -128,13 +148,15 @@ class Scaler:
     def getMetrics(self):
         self.num_active_instance = 0
         cpu_util = 0
-        for instance  in self.getInstances():
+        for instance in self.getRunnableInstances():
             status = instance.getStatus()
             # if (status == Status.WORKING or status == Status.ACTIVE) and instance.deactivatetimer < 0:
             if status == Status.WORKING or status == Status.ACTIVE:
                 cpu_util += instance.getCpuUtilization()
                 instance.setCpuCtr(0)
                 self.num_active_instance += 1
+        if self.num_active_instance == 0:
+            return 1.0
         cpu_util /= self.num_active_instance
         ideal_instance =  cpu_util / self.config.CONFIG_SCALE_TARGET
         return ideal_instance

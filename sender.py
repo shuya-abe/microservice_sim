@@ -14,7 +14,10 @@ class Sender:
         return
     
     def runStep(self, cluster, step, step_per_time):
-        while self.request_ptr < self.countReqs() and self.getNextRequestTime() * step_per_time <= step:
+        reqs = self.reqs
+        request_ptr = self.request_ptr
+        reqs_len = len(reqs)
+        while request_ptr < reqs_len and reqs[request_ptr].getStartTime() * step_per_time <= step:
             # id = self.getNumRequests()
             # workload = self.calculateWorkload4Request(step_per_time)
             # request = self.createRequest(id, workload, step)
@@ -22,11 +25,12 @@ class Sender:
             # self.incrementNumRequest()
             # time_next = self.calculateNextRequest(step, step_per_time)
             # self.setNextRequestTime(time_next)
-            req = self.reqs[self.request_ptr]
+            req = reqs[request_ptr]
             # req.setStartTime(step/step_per_time)
             cluster.addRequest(req)
             # self.incrementNumRequest()
-            self.request_ptr += 1
+            request_ptr += 1
+        self.request_ptr = request_ptr
         return
 
     def countReqs(self):

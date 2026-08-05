@@ -1,6 +1,7 @@
 from request import Request
 from status import Status
 from config import Config
+from collections import deque
 
 class Instance:
     def __init__(self, capacity, num_CPU, queue_length, status, config:Config):
@@ -9,10 +10,11 @@ class Instance:
         self.setuptimer = -1
         self.deactivatetimer = -1
         self.status = status
+        self.status_manager = None
         self.processing_capacity = capacity / self.config.SIM_STEP_PER_TIME
         self.num_CPU = num_CPU
         self.max_queue_length = queue_length
-        self.queue: list[Request] = []
+        self.queue = deque()
         self.exec_queue = []
         for i in range(self.num_CPU):
             self.exec_queue.append(None)
@@ -46,7 +48,8 @@ class Instance:
         return self.max_queue_length
     
     def addRequest(self, req:Request):
-        if self.getMaxQueueLength() > self.getQueueLength() or self.getMaxQueueLength() < 0:
+        max_queue_length = self.max_queue_length
+        if max_queue_length < 0 or len(self.queue) < max_queue_length:
             req.setStatus(Status.QUEUEING)
             self.queue.append(req)
         else:
@@ -55,11 +58,22 @@ class Instance:
     
     def delRequest(self, req:Request):
         # req.setStatus(Status.FINISHED)
-        self.queue.remove(req)
+        self.queue.popleft()
         return
     
     def setStatus(self, status):
+        prev_status = self.status
         self.status = status
+        status_manager = self.status_manager
+        if status_manager is not None and prev_status != status:
+            if prev_status == Status.INACTIVE and status != Status.INACTIVE:
+                status_manager.registerRunnableInstance(self)
+            elif prev_status != Status.INACTIVE and status == Status.INACTIVE:
+                status_manager.removeRunnableInstance(self)
+        return
+
+    def setStatusManager(self, status_manager):
+        self.status_manager = status_manager
         return
     
     def getStatus(self):
@@ -71,26 +85,27 @@ class Instance:
     def processRequests(self, time):
         end_reqs: list[Request] = []
         num_CPU = self.num_CPU
+        queue = self.queue
+        exec_queue = self.exec_queue
         is_process = False
         
         for i in range(num_CPU):
-            if self.exec_queue[i] != None:
-                req = self.exec_queue[i]
-                self.setStatus(Status.WORKING)
+            if exec_queue[i] is not None:
+                req = exec_queue[i]
+                self.status = Status.WORKING
                 return_req = self.processRequest(req, time)
                 is_process = True
                 if return_req is not None:
                     end_reqs.append(return_req)
-                    self.exec_queue[i] = None
+                    exec_queue[i] = None
                 else:
                     self.incrementCpuCtr()
                     continue
-            if self.exec_queue[i] == None and self.getQueueLength() > 0:
-                req = self.queue[0]
-                self.delRequest(req)
-                self.exec_queue[i] = req
+            if exec_queue[i] is None and queue:
+                req = queue.popleft()
+                exec_queue[i] = req
                 
-                self.setStatus(Status.WORKING)
+                self.status = Status.WORKING
                 return_req = self.processRequest(req, time)
                 is_process = True
                 self.incrementCpuCtr()
@@ -152,10 +167,9 @@ class Instance:
         status = self.getStatus()
         if status == Status.ACTIVE or status == Status.WORKING:
             end_reqs, is_process = self.processRequests(time)
-            length = self.getQueueLength()
-            return end_reqs, length, is_process
+            return end_reqs
         elif status == Status.SETUP:
             self.setupInstance()
         elif status == Status.SHUTDOWN:
             self.shutdownInstance()
-        return [], self.getQueueLength(), False
+        return []

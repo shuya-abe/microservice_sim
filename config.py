@@ -2,6 +2,15 @@ from limit import Limit
 from sim_flg import Flg
 from status import Status
 import datetime
+import re
+
+
+def _sanitize_experiment_id(raw_id):
+    text = str(raw_id).strip()
+    if text == "":
+        text = "exp"
+    text = re.sub(r"[^A-Za-z0-9_]", "_", text)
+    return text
 
 class Config:
     
@@ -82,9 +91,17 @@ class Config:
         return
     
     def initialSetup(self, config, sim_index):
-        self.SIM_THRESHOLD = int(config[0])
-        self.SIM_STEP_PER_TIME = int(config[1])
-        limit = config[2]
+        has_experiment_id = len(config) >= 4 and str(config[3]).strip() in ("req", "time", "step")
+        base_idx = 1 if has_experiment_id else 0
+
+        if has_experiment_id:
+            self.EXPERIMENT_ID = _sanitize_experiment_id(config[0])
+        else:
+            self.EXPERIMENT_ID = _sanitize_experiment_id(f"legacy_{sim_index}")
+
+        self.SIM_THRESHOLD = int(config[base_idx + 0])
+        self.SIM_STEP_PER_TIME = int(config[base_idx + 1])
+        limit = config[base_idx + 2]
         if limit == "req":
             self.SIM_LIMIT = Limit.LIMIT_REQUEST
         elif limit == "time":
@@ -93,34 +110,43 @@ class Config:
             self.SIM_LIMIT = Limit.LIMIT_TIMESTEP
         else:
             exit()
-        self.CONFIG_CLUSTER_CPU = int(config[3])
-        self.CONFIG_LAMBDA = float(config[4])
-        self.CONFIG_MU = float(config[5])
-        req_flg = config[6]
+        self.CONFIG_CLUSTER_CPU = int(config[base_idx + 3])
+        self.CONFIG_LAMBDA = float(config[base_idx + 4])
+        self.CONFIG_MU = float(config[base_idx + 5])
+        req_flg = config[base_idx + 6]
         if req_flg == "input":
             self.CONFIG_REQUEST_FLG = Flg.FLG_INPUT
         else:
             self.CONFIG_REQUEST_FLG = Flg.FLG_OUTPUT
-        self.CONFIG_SCALE_SENSITIVE = float(config[7])
-        self.CONFIG_SCALE_INTERVAL = int(config[8])
-        self.CONFIG_SCALE_TARGET = float(config[9])
-        self.CONFIG_SERVERLESS_TIMER = int(config[10])
-        instance_flg = config[11]
+        self.CONFIG_SCALE_SENSITIVE = float(config[base_idx + 7])
+        self.CONFIG_SCALE_INTERVAL = int(config[base_idx + 8])
+        self.CONFIG_SCALE_TARGET = float(config[base_idx + 9])
+        self.CONFIG_SERVERLESS_TIMER = int(config[base_idx + 10])
+        instance_flg = config[base_idx + 11]
         if instance_flg == "container":
             self.CONFIG_INSTANCE_FLG = Flg.FLG_CONTAINER
         elif instance_flg == "serverless":
             self.CONFIG_INSTANCE_FLG = Flg.FLG_SERVERLESS
         else:
             exit()
-        self.CONFIG_DEFAULT_FLG = bool(config[12])
-        self.CONFIG_DEFAULT_NUM = int(config[13])
-        self.CONFIG_DEFAULT_SETUPTIME = int(config[14])
-        self.CONFIG_DEFAULT_SHUTDOWNTIME = int(config[15])
-        self.CONFIG_DEFAULT_CAPACITY = int(config[16])
-        self.CONFIG_DEFAULT_num_CPU = int(config[17])
-        self.CONFIG_DEFAULT_QUEUE_LENGTH = int(config[18])
+        self.CONFIG_DEFAULT_FLG = bool(config[base_idx + 12])
+        self.CONFIG_DEFAULT_NUM = int(config[base_idx + 13])
+
+        has_default_start_instances = len(config) > (base_idx + 20) and str(config[base_idx + 20]).strip().lower() in ("inactive", "active")
+        if has_default_start_instances:
+            self.CONFIG_DEFAULT_START_INSTANCES = int(config[base_idx + 14])
+            detail_offset = 1
+        else:
+            self.CONFIG_DEFAULT_START_INSTANCES = 1 if self.CONFIG_INSTANCE_FLG == Flg.FLG_CONTAINER else 0
+            detail_offset = 0
+
+        self.CONFIG_DEFAULT_SETUPTIME = int(config[base_idx + 14 + detail_offset])
+        self.CONFIG_DEFAULT_SHUTDOWNTIME = int(config[base_idx + 15 + detail_offset])
+        self.CONFIG_DEFAULT_CAPACITY = int(config[base_idx + 16 + detail_offset])
+        self.CONFIG_DEFAULT_num_CPU = int(config[base_idx + 17 + detail_offset])
+        self.CONFIG_DEFAULT_QUEUE_LENGTH = int(config[base_idx + 18 + detail_offset])
         
-        default_status = config[19]
+        default_status = config[base_idx + 19 + detail_offset]
         if default_status == "inactive":
             self.CONFIG_DEFAULT_STATUS = Status.INACTIVE
         elif default_status == "active":
@@ -128,13 +154,13 @@ class Config:
         else:
             exit()
         
-        sim_flg = config[20]
+        sim_flg = config[base_idx + 20 + detail_offset]
         if sim_flg == "verbose":
             self.SIM_FLG = Flg.FLG_VERBOSE
         elif sim_flg == "simple":
             self.SIM_FLG = Flg.FLG_DEFAULT
         
-        self.SIM_DEFAULT_OUTPUT_FILE = config[21]
+        self.SIM_DEFAULT_OUTPUT_FILE = config[base_idx + 21 + detail_offset]
         
         if not self.CONFIG_DEFAULT_FLG:
             self.CONFIG_INSTANCES = [
@@ -152,7 +178,7 @@ class Config:
         
         self.SIM_INDEX = sim_index
         
-        self.date = datetime.datetime.now().strftime('%Y%m%d_%H%M_')
+        self.date = str(self.EXPERIMENT_ID) + "_"
         
         if (self.SIM_LIMIT == Limit.LIMIT_TIME):
             self.CONFIG_REQUEST_FILE = "./requests/" + str(self.SIM_THRESHOLD) + "sec" + "_lambda" + str(self.CONFIG_LAMBDA) + "_mu" + str(self.CONFIG_MU) + "_" + str(self.SIM_INDEX) + ".csv"

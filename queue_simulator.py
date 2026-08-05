@@ -15,6 +15,7 @@ from container import Container
 from serverless import Serverless
 import datetime
 import os
+import math
 
 class QueueSimulator:
 
@@ -50,6 +51,7 @@ class QueueSimulator:
         self.num_reqs = 0
         
         self.mode = self.config.CONFIG_INSTANCE_FLG
+        self.enable_hybrid_skip = bool(getattr(self.config, "SIM_ENABLE_HYBRID_SKIP", True))
 
         self.addCluster(Cluster(config))
         balancer = Balancer(config)
@@ -96,7 +98,7 @@ class QueueSimulator:
         outfile = self.config.OUTPUT_FILE_PACKET
         with open(outfile, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(["id", "processedBy", "workload", "start", "end", "time_lifetime", "time_wait", "time_service"])
+            writer.writerow(["id", "processed_by", "workload", "start", "end", "time_lifetime", "time_wait", "time_service"])
         
         return
 
@@ -137,6 +139,7 @@ class QueueSimulator:
         
         with open(outfile, 'w', newline='') as f:
             writer = csv.writer(f)
+            writer.writerow(["sim_time", "step", "num_hot_instances"])
         
             # balancer = self.getCluster().getBalancer()
             # before_instances = balancer.getNumOfInstances()
@@ -147,21 +150,20 @@ class QueueSimulator:
             elif limit == Limit.LIMIT_REQUEST:
                 while(threshold > self.countReqs()):
                     before_instances = self.simulateStepWrapper(writer, before_instances)
-                    f.flush()
             elif limit == Limit.LIMIT_TIMESTEP:
                 while(threshold > self.getStep() or self.countReqs() < self.sender.countReqs()):
                     before_instances = self.simulateStepWrapper(writer, before_instances)
-                    f.flush()
             elif limit == Limit.LIMIT_TIME:
                 while(threshold > self.getTime() or self.countReqs() < self.sender.countReqs()):
                     before_instances = self.simulateStepWrapper(writer, before_instances)
-                    f.flush()
             else:
                 return
 
         return
     
     def simulateStepWrapper(self, writer, before_instances):
+        if self.enable_hybrid_skip:
+            self.fastForwardIdleSteps()
         self.simulateStep()
         # num_instances = balancer.getNumOfInstances()
         num_instances = self.getNumOfHotInstance()
@@ -172,11 +174,166 @@ class QueueSimulator:
             before_instances = num_instances
         self.incrementStep()
         return num_instances
+
+    def fastForwardIdleSteps(self):
+        step = self.getStep()
+        if self.hasImmediateEvent(step):
+            return
+
+        next_event_step = self.getNextEventStep(step)
+        if next_event_step is None or next_event_step <= step:
+            return
+
+        skip_steps = next_event_step - step
+        self.advanceBusyWork(skip_steps)
+        self.timestep += skip_steps
+
+    def hasImmediateEvent(self, step):
+        sender = self.getSender()
+        scaler = self.getCluster().getScaler()
+        balancer = self.getCluster().getBalancer()
+
+        next_arrival = self.getNextArrivalStep()
+        if next_arrival is not None and next_arrival <= step:
+            return True
+
+        if balancer.getRequests():
+            return True
+
+        if self.mode == Flg.FLG_CONTAINER and scaler.isTime2Check(step):
+            return True
+
+        serverless_idle_steps = self.config.CONFIG_SERVERLESS_TIMER * self.config.SIM_STEP_PER_TIME
+        for instance in scaler.getRunnableInstances():
+            status = instance.getStatus()
+
+            if status == Status.SETUP:
+                if isinstance(instance, Serverless):
+                    if instance.setuptimer <= 1:
+                        return True
+                elif instance.setuptimer <= 0:
+                    return True
+
+            if status == Status.SHUTDOWN and instance.deactivatetimer <= 0:
+                return True
+
+            if status != Status.ACTIVE and status != Status.WORKING:
+                continue
+
+            exec_queue = instance.exec_queue
+            queue = instance.queue
+
+            if queue and any(slot is None for slot in exec_queue):
+                return True
+
+            for req in exec_queue:
+                if req is not None and req.workload <= 0:
+                    return True
+
+            if self.mode == Flg.FLG_SERVERLESS and status == Status.ACTIVE:
+                if step - instance.getLastTime() >= serverless_idle_steps:
+                    return True
+
+        return False
+
+    def getNextArrivalStep(self):
+        sender = self.getSender()
+        if sender.request_ptr >= sender.countReqs():
+            return None
+        time_start = sender.reqs[sender.request_ptr].getStartTime()
+        return int(round(time_start * self.step_per_time))
+
+    def getNextEventStep(self, step):
+        scaler = self.getCluster().getScaler()
+        candidates = []
+
+        next_arrival = self.getNextArrivalStep()
+        if next_arrival is not None and next_arrival > step:
+            candidates.append(next_arrival)
+
+        if self.mode == Flg.FLG_CONTAINER:
+            interval = self.config.CONFIG_SCALE_INTERVAL * self.config.SIM_STEP_PER_TIME
+            if interval > 0:
+                rem = step % interval
+                next_check = step + (interval - rem)
+                if rem == 0:
+                    next_check = step + interval
+                candidates.append(next_check)
+
+        serverless_idle_steps = self.config.CONFIG_SERVERLESS_TIMER * self.config.SIM_STEP_PER_TIME
+
+        for instance in scaler.getRunnableInstances():
+            status = instance.getStatus()
+
+            if status == Status.SETUP:
+                if isinstance(instance, Serverless):
+                    candidate = step + max(1, instance.setuptimer - 1)
+                else:
+                    candidate = step + max(1, instance.setuptimer)
+                candidates.append(candidate)
+                continue
+
+            if status == Status.SHUTDOWN:
+                candidates.append(step + max(1, instance.deactivatetimer))
+                continue
+
+            if status != Status.ACTIVE and status != Status.WORKING:
+                continue
+
+            if self.mode == Flg.FLG_SERVERLESS and status == Status.ACTIVE:
+                deactivate_step = instance.getLastTime() + serverless_idle_steps
+                if deactivate_step > step:
+                    candidates.append(deactivate_step)
+
+            for req in instance.exec_queue:
+                if req is None:
+                    continue
+                if req.workload <= 0:
+                    candidates.append(step)
+                    continue
+                processing_steps = int(math.ceil(req.workload / instance.processing_capacity))
+                candidates.append(step + processing_steps)
+
+        if not candidates:
+            return None
+        return min(candidates)
+
+    def advanceBusyWork(self, skip_steps):
+        if skip_steps <= 0:
+            return
+
+        step = self.getStep()
+        scaler = self.getCluster().getScaler()
+        for instance in scaler.getRunnableInstances():
+            status = instance.getStatus()
+            if status == Status.SETUP:
+                instance.setuptimer -= skip_steps
+                continue
+
+            if status == Status.SHUTDOWN:
+                instance.deactivatetimer -= skip_steps
+                continue
+
+            if status != Status.ACTIVE and status != Status.WORKING:
+                continue
+
+            busy_slots = 0
+            for req in instance.exec_queue:
+                if req is None:
+                    continue
+                if req.workload > 0:
+                    req.workload -= instance.processing_capacity * skip_steps
+                    busy_slots += 1
+
+            if busy_slots > 0:
+                instance.CpuCtr += busy_slots * skip_steps
+                if self.mode == Flg.FLG_SERVERLESS:
+                    instance.setLastTime(step + skip_steps - 1)
     
     def getNumOfHotInstance(self):
         scaler = self.getCluster().getScaler()
         num = 0
-        for instance in scaler.getInstances():
+        for instance in scaler.getRunnableInstances():
             status = instance.getStatus()
             if status == Status.ACTIVE or status == Status.WORKING:
                 num += 1
@@ -194,8 +351,8 @@ class QueueSimulator:
         scaler.runStep(step)
         # list_length_step = []
         # list_is_process_step = []
-        for instance in scaler.getInstances():
-            reqs, length, is_process = instance.runStep(step)
+        for instance in tuple(scaler.getRunnableInstances()):
+            reqs = instance.runStep(step)
             self.registerReqs(reqs)
         #     list_length_step.append(length)
         #     list_is_process_step.append(is_process)
@@ -265,13 +422,12 @@ class QueueSimulator:
         outfile = self.config.OUTPUT_FILE_PACKET
         with open(outfile, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(["id", "processedBy", "workload", "start", "end", "time_lifetime", "time_wait", "time_service"])
+            writer.writerow(["id", "processed_by", "workload", "start", "end", "time_lifetime", "time_wait", "time_service"])
             for req in self.reqs:
                 id, processedBy, workload, start, end, time_lifetime, time_wait = self.calcResultPacket(req)
                 writer.writerow([id, processedBy, workload, start, end, time_lifetime, time_wait, time_lifetime - time_wait])
                 total += time_lifetime
                 total_wait += time_wait
-            f.flush()
         return total, total_wait
 
     def calcResultPacket(self, req):
@@ -316,11 +472,28 @@ class QueueSimulator:
         print("Cluster TIME: (ex) %f" % (ex_time_total))
 
 
-        with open(self.config.SIM_DEFAULT_OUTPUT_FILE, 'a', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow([datetime.datetime.now(), self.CONFIG_REQUEST_FILE, self.config.CONFIG_LAMBDA, self.config.CONFIG_MU, len(self.cluster.getInstances()), self.config.CONFIG_DEFAULT_CAPACITY, self.config.CONFIG_DEFAULT_num_CPU, self.step_per_time, total_time, num_steps, num_reqs, ex_time_service, ex_time_wait, ex_time_total])
+        summary_row = [
+            datetime.datetime.now(),
+            self.CONFIG_REQUEST_FILE,
+            self.config.CONFIG_LAMBDA,
+            self.config.CONFIG_MU,
+            len(self.cluster.getInstances()),
+            self.config.CONFIG_DEFAULT_CAPACITY,
+            self.config.CONFIG_DEFAULT_num_CPU,
+            self.step_per_time,
+            total_time,
+            num_steps,
+            num_reqs,
+            ex_time_service,
+            ex_time_wait,
+            ex_time_total,
+        ]
 
-        return [total_time, num_steps, num_reqs, ex_time_service, ex_time_wait, ex_time_total]
+        return {
+            "result": [total_time, num_steps, num_reqs, ex_time_service, ex_time_wait, ex_time_total],
+            "summary_output_file": self.config.SIM_DEFAULT_OUTPUT_FILE,
+            "summary_row": summary_row,
+        }
     
     def registerReqs(self, reqs):
         self.reqs.extend(reqs)
@@ -374,6 +547,8 @@ class QueueSimulator:
             instance = Container(capacity, num_CPU, queue_length, status, self.config)
         elif self.mode == Flg.FLG_SERVERLESS:
             instance = Serverless(capacity, num_CPU, queue_length, status, self.config)
+        else:
+            raise ValueError("Unsupported instance mode")
         return instance
     
     def createInstances(self):
@@ -386,17 +561,17 @@ class QueueSimulator:
             num_CPU = self.config.CONFIG_DEFAULT_num_CPU
             queue_length = self.config.CONFIG_DEFAULT_QUEUE_LENGTH
             status = self.config.CONFIG_DEFAULT_STATUS
-            
-            start = 0
-            if self.mode == Flg.FLG_CONTAINER:
-                instance = self.createInstance(capacity, num_CPU, queue_length, Status.ACTIVE)
-                instance.setId(0)
-                cluster.addInstance(instance)
-                cluster.registerInstance2Scaler(instance)
-                start += 1
-            
-            for i in range(start,self.config.CONFIG_DEFAULT_NUM):
-                instance = self.createInstance(capacity, num_CPU, queue_length, status)
+
+            default_start_instances = getattr(
+                self.config,
+                "CONFIG_DEFAULT_START_INSTANCES",
+                1 if self.mode == Flg.FLG_CONTAINER else 0,
+            )
+            default_start_instances = max(0, min(int(default_start_instances), self.config.CONFIG_DEFAULT_NUM))
+
+            for i in range(self.config.CONFIG_DEFAULT_NUM):
+                initial_status = Status.ACTIVE if i < default_start_instances else status
+                instance = self.createInstance(capacity, num_CPU, queue_length, initial_status)
                 instance.setId(i)
                 if not cluster.addInstance(instance):
                     break

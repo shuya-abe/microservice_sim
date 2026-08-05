@@ -65,13 +65,12 @@ class Balancer:
         return
 
     def manageQueue(self):
-        del_reqs = []
         reqs = self.getRequests()
+        remain_reqs = []
         for req in reqs:
-            if self.tryForward2Instance(req) != None:
-                del_reqs.append(req)
-        for req in del_reqs:
-            reqs.remove(req)
+            if self.tryForward2Instance(req) is None:
+                remain_reqs.append(req)
+        reqs[:] = remain_reqs
         return
     
     def tryForward2Instance(self, req):
@@ -84,13 +83,13 @@ class Balancer:
     def chooseInstance(self):
         if self.mode == Flg.FLG_CONTAINER:
             # round robin
-            instance = self.roundRobin()
+            # instance = self.roundRobin()
             
             # 0916 balancer with queue
-            # for instance in self.getInstances():
-            #     if (instance.getStatus() == Status.ACTIVE or instance.getStatus() == Status.WORKING) and instance.getQueueLength() == 0:
-            #         return instance
-            # return None
+            for instance in self.getInstances():
+                if (instance.getStatus() == Status.ACTIVE or instance.getStatus() == Status.WORKING) and instance.getQueueLength() == 0:
+                    return instance
+            return None
 
         elif self.mode == Flg.FLG_SERVERLESS:
             # hottest
