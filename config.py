@@ -127,6 +127,8 @@ class Config:
             self.CONFIG_INSTANCE_FLG = Flg.FLG_CONTAINER
         elif instance_flg == "serverless":
             self.CONFIG_INSTANCE_FLG = Flg.FLG_SERVERLESS
+        elif instance_flg in ("serverless_warm_wait", "serverless_wait"):
+            self.CONFIG_INSTANCE_FLG = Flg.FLG_SERVERLESS_WARM_WAIT
         else:
             exit()
         self.CONFIG_DEFAULT_FLG = bool(config[base_idx + 12])
@@ -190,44 +192,26 @@ class Config:
             self.CONFIG_REQUEST_FILE = "./requests/" + str(self.SIM_THRESHOLD) + "sec" + "_lambda" + str(self.CONFIG_LAMBDA) + "_mu" + str(self.CONFIG_MU) + "_" + str(self.SIM_INDEX) + ".csv"
             
         self.OUTPUT_FILE = ""
-        if self.CONFIG_INSTANCE_FLG == Flg.FLG_CONTAINER:
+        mode_tag = self._instance_mode_tag()
+        if self.CONFIG_INSTANCE_FLG == Flg.FLG_CONTAINER or Flg.is_serverless(self.CONFIG_INSTANCE_FLG):
             if self.CONFIG_DEFAULT_FLG:
                 if (self.SIM_LIMIT == Limit.LIMIT_TIME):
-                    self.OUTPUT_FILE = "./result/" + str(self.date) + str(self.CONFIG_DEFAULT_NUM) + "srv_" + str(self.CONFIG_DEFAULT_num_CPU) + "CPU_" + str(self.SIM_THRESHOLD) + "time_lambda" + str(self.CONFIG_LAMBDA) + "_mu" + str(self.CONFIG_MU) + "_container"
+                    self.OUTPUT_FILE = "./result/" + str(self.date) + str(self.CONFIG_DEFAULT_NUM) + "srv_" + str(self.CONFIG_DEFAULT_num_CPU) + "CPU_" + str(self.SIM_THRESHOLD) + "time_lambda" + str(self.CONFIG_LAMBDA) + "_mu" + str(self.CONFIG_MU) + "_" + mode_tag
                 elif (self.SIM_LIMIT == Limit.LIMIT_TIMESTEP):
-                    self.OUTPUT_FILE = "./result/" + str(self.date) + str(self.CONFIG_DEFAULT_NUM) + "srv_" + str(self.CONFIG_DEFAULT_num_CPU) + "CPU_" + str(self.SIM_THRESHOLD) + "step_lambda" + str(self.CONFIG_LAMBDA) + "_mu" + str(self.CONFIG_MU) + "_container"
+                    self.OUTPUT_FILE = "./result/" + str(self.date) + str(self.CONFIG_DEFAULT_NUM) + "srv_" + str(self.CONFIG_DEFAULT_num_CPU) + "CPU_" + str(self.SIM_THRESHOLD) + "step_lambda" + str(self.CONFIG_LAMBDA) + "_mu" + str(self.CONFIG_MU) + "_" + mode_tag
                 elif (self.SIM_LIMIT == Limit.LIMIT_REQUEST):
-                    self.OUTPUT_FILE = "./result/" + str(self.date) + str(self.CONFIG_DEFAULT_NUM) + "srv_" + str(self.CONFIG_DEFAULT_num_CPU) + "CPU_" + str(self.SIM_THRESHOLD) + "req_lambda" + str(self.CONFIG_LAMBDA) + "_mu" + str(self.CONFIG_MU) + "_container"
+                    self.OUTPUT_FILE = "./result/" + str(self.date) + str(self.CONFIG_DEFAULT_NUM) + "srv_" + str(self.CONFIG_DEFAULT_num_CPU) + "CPU_" + str(self.SIM_THRESHOLD) + "req_lambda" + str(self.CONFIG_LAMBDA) + "_mu" + str(self.CONFIG_MU) + "_" + mode_tag
                 else:
-                    self.OUTPUT_FILE = "./result/" + str(self.date) + str(self.CONFIG_DEFAULT_NUM) + "srv_" + str(self.CONFIG_DEFAULT_num_CPU) + "CPU_" + str(self.SIM_THRESHOLD) + "step_lambda" + str(self.CONFIG_LAMBDA) + "_mu" + str(self.CONFIG_MU) + "_container"
+                    self.OUTPUT_FILE = "./result/" + str(self.date) + str(self.CONFIG_DEFAULT_NUM) + "srv_" + str(self.CONFIG_DEFAULT_num_CPU) + "CPU_" + str(self.SIM_THRESHOLD) + "step_lambda" + str(self.CONFIG_LAMBDA) + "_mu" + str(self.CONFIG_MU) + "_" + mode_tag
             else:
                 if (self.SIM_LIMIT == Limit.LIMIT_TIME):
-                    self.OUTPUT_FILE = "./result/" + str(self.date) + str(len(self.CONFIG_INSTANCES)) + "srv_" + str(self.CONFIG_DEFAULT_num_CPU) + "CPU_" + str(self.SIM_THRESHOLD) + "time_lambda" + str(self.CONFIG_LAMBDA) + "_mu" + str(self.CONFIG_MU) + "_container"            
+                    self.OUTPUT_FILE = "./result/" + str(self.date) + str(len(self.CONFIG_INSTANCES)) + "srv_" + str(self.CONFIG_DEFAULT_num_CPU) + "CPU_" + str(self.SIM_THRESHOLD) + "time_lambda" + str(self.CONFIG_LAMBDA) + "_mu" + str(self.CONFIG_MU) + "_" + mode_tag
                 elif (self.SIM_LIMIT == Limit.LIMIT_TIMESTEP):
-                    self.OUTPUT_FILE = "./result/" + str(self.date) + str(len(self.CONFIG_INSTANCES)) + "srv_" + str(self.CONFIG_DEFAULT_num_CPU) + "CPU_" + str(self.SIM_THRESHOLD) + "step_lambda" + str(self.CONFIG_LAMBDA) + "_mu" + str(self.CONFIG_MU) + "_container"            
+                    self.OUTPUT_FILE = "./result/" + str(self.date) + str(len(self.CONFIG_INSTANCES)) + "srv_" + str(self.CONFIG_DEFAULT_num_CPU) + "CPU_" + str(self.SIM_THRESHOLD) + "step_lambda" + str(self.CONFIG_LAMBDA) + "_mu" + str(self.CONFIG_MU) + "_" + mode_tag
                 elif (self.SIM_LIMIT == Limit.LIMIT_REQUEST):
-                    self.OUTPUT_FILE = "./result/" + str(self.date) + str(len(self.CONFIG_INSTANCES)) + "srv_" + str(self.CONFIG_DEFAULT_num_CPU) + "CPU_" + str(self.SIM_THRESHOLD) + "req_lambda" + str(self.CONFIG_LAMBDA) + "_mu" + str(self.CONFIG_MU) + "_container"            
+                    self.OUTPUT_FILE = "./result/" + str(self.date) + str(len(self.CONFIG_INSTANCES)) + "srv_" + str(self.CONFIG_DEFAULT_num_CPU) + "CPU_" + str(self.SIM_THRESHOLD) + "req_lambda" + str(self.CONFIG_LAMBDA) + "_mu" + str(self.CONFIG_MU) + "_" + mode_tag
                 else:
-                    self.OUTPUT_FILE = "./result/" + str(self.date) + str(len(self.CONFIG_INSTANCES)) + "srv_" + str(self.CONFIG_DEFAULT_num_CPU) + "CPU_" + str(self.SIM_THRESHOLD) + "step_lambda" + str(self.CONFIG_LAMBDA) + "_mu" + str(self.CONFIG_MU) + "_container"            
-        elif self.CONFIG_INSTANCE_FLG == Flg.FLG_SERVERLESS:
-            if self.CONFIG_DEFAULT_FLG:
-                if (self.SIM_LIMIT == Limit.LIMIT_TIME):
-                    self.OUTPUT_FILE = "./result/" + str(self.date) + str(self.CONFIG_DEFAULT_NUM) + "srv_" + str(self.CONFIG_DEFAULT_num_CPU) + "CPU_" + str(self.SIM_THRESHOLD) + "time_lambda" + str(self.CONFIG_LAMBDA) + "_mu" + str(self.CONFIG_MU) + "_serverless"
-                elif (self.SIM_LIMIT == Limit.LIMIT_TIMESTEP):
-                    self.OUTPUT_FILE = "./result/" + str(self.date) + str(self.CONFIG_DEFAULT_NUM) + "srv_" + str(self.CONFIG_DEFAULT_num_CPU) + "CPU_" + str(self.SIM_THRESHOLD) + "step_lambda" + str(self.CONFIG_LAMBDA) + "_mu" + str(self.CONFIG_MU) + "_serverless"
-                elif (self.SIM_LIMIT == Limit.LIMIT_REQUEST):
-                    self.OUTPUT_FILE = "./result/" + str(self.date) + str(self.CONFIG_DEFAULT_NUM) + "srv_" + str(self.CONFIG_DEFAULT_num_CPU) + "CPU_" + str(self.SIM_THRESHOLD) + "req_lambda" + str(self.CONFIG_LAMBDA) + "_mu" + str(self.CONFIG_MU) + "_serverless"
-                else:
-                    self.OUTPUT_FILE = "./result/" + str(self.date) + str(self.CONFIG_DEFAULT_NUM) + "srv_" + str(self.CONFIG_DEFAULT_num_CPU) + "CPU_" + str(self.SIM_THRESHOLD) + "step_lambda" + str(self.CONFIG_LAMBDA) + "_mu" + str(self.CONFIG_MU) + "_serverless"
-            else:
-                if (self.SIM_LIMIT == Limit.LIMIT_TIME):
-                    self.OUTPUT_FILE = "./result/" + str(self.date) + str(len(self.CONFIG_INSTANCES)) + "srv_" + str(self.CONFIG_DEFAULT_num_CPU) + "CPU_" + str(self.SIM_THRESHOLD) + "time_lambda" + str(self.CONFIG_LAMBDA) + "_mu" + str(self.CONFIG_MU) + "_serverless"
-                elif (self.SIM_LIMIT == Limit.LIMIT_TIMESTEP):
-                    self.OUTPUT_FILE = "./result/" + str(self.date) + str(len(self.CONFIG_INSTANCES)) + "srv_" + str(self.CONFIG_DEFAULT_num_CPU) + "CPU_" + str(self.SIM_THRESHOLD) + "step_lambda" + str(self.CONFIG_LAMBDA) + "_mu" + str(self.CONFIG_MU) + "_serverless"
-                elif (self.SIM_LIMIT == Limit.LIMIT_REQUEST):
-                    self.OUTPUT_FILE = "./result/" + str(self.date) + str(len(self.CONFIG_INSTANCES)) + "srv_" + str(self.CONFIG_DEFAULT_num_CPU) + "CPU_" + str(self.SIM_THRESHOLD) + "req_lambda" + str(self.CONFIG_LAMBDA) + "_mu" + str(self.CONFIG_MU) + "_serverless"
-                else:
-                    self.OUTPUT_FILE = "./result/" + str(self.date) + str(len(self.CONFIG_INSTANCES)) + "srv_" + str(self.CONFIG_DEFAULT_num_CPU) + "CPU_" + str(self.SIM_THRESHOLD) + "step_lambda" + str(self.CONFIG_LAMBDA) + "_mu" + str(self.CONFIG_MU) + "_serverless"
+                    self.OUTPUT_FILE = "./result/" + str(self.date) + str(len(self.CONFIG_INSTANCES)) + "srv_" + str(self.CONFIG_DEFAULT_num_CPU) + "CPU_" + str(self.SIM_THRESHOLD) + "step_lambda" + str(self.CONFIG_LAMBDA) + "_mu" + str(self.CONFIG_MU) + "_" + mode_tag
         self.OUTPUT_FILE_PACKET = self.OUTPUT_FILE + "_" + str(self.SIM_INDEX) + "_packet.csv"
         self.OUTPUT_FILE_NUM_INSTANCE = self.OUTPUT_FILE + "_" + str(self.SIM_INDEX) + "_num_instance.csv"
         self.OUTPUT_FILE = self.OUTPUT_FILE + "_" + str(self.SIM_INDEX) + "_result.csv"
@@ -236,3 +220,10 @@ class Config:
 
 
         return
+
+    def _instance_mode_tag(self):
+        if self.CONFIG_INSTANCE_FLG == Flg.FLG_CONTAINER:
+            return "container"
+        if self.CONFIG_INSTANCE_FLG == Flg.FLG_SERVERLESS_WARM_WAIT:
+            return "serverless_warm_wait"
+        return "serverless"

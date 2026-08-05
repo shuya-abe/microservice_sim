@@ -9,6 +9,12 @@ class Flg(Constant):
     
     FLG_CONTAINER = 20
     FLG_SERVERLESS = 21
+    # Serverless routing that may wait for warm capacity instead of always cold-starting.
+    FLG_SERVERLESS_WARM_WAIT = 22
 
     def __init__(self):
         return
+
+    @staticmethod
+    def is_serverless(mode):
+        return mode in (Flg.FLG_SERVERLESS, Flg.FLG_SERVERLESS_WARM_WAIT)

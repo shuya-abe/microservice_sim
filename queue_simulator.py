@@ -198,12 +198,22 @@ class QueueSimulator:
             return True
 
         if balancer.getRequests():
-            return True
+            # Warm-wait may intentionally keep requests queued; only treat as
+            # immediate when an assign/cold-start can happen this step.
+            if self.mode == Flg.FLG_SERVERLESS_WARM_WAIT:
+                if balancer.hasAssignableOrScalableWork():
+                    return True
+            else:
+                return True
 
         if self.mode == Flg.FLG_CONTAINER and scaler.isTime2Check(step):
             return True
 
         serverless_idle_steps = self.config.CONFIG_SERVERLESS_TIMER * self.config.SIM_STEP_PER_TIME
+        defer_idle = (
+            self.mode == Flg.FLG_SERVERLESS_WARM_WAIT
+            and bool(balancer.getRequests())
+        )
         for instance in scaler.getRunnableInstances():
             status = instance.getStatus()
 
@@ -230,7 +240,7 @@ class QueueSimulator:
                 if req is not None and req.workload <= 0:
                     return True
 
-            if self.mode == Flg.FLG_SERVERLESS and status == Status.ACTIVE:
+            if Flg.is_serverless(self.mode) and status == Status.ACTIVE and not defer_idle:
                 if step - instance.getLastTime() >= serverless_idle_steps:
                     return True
 
@@ -261,6 +271,10 @@ class QueueSimulator:
                 candidates.append(next_check)
 
         serverless_idle_steps = self.config.CONFIG_SERVERLESS_TIMER * self.config.SIM_STEP_PER_TIME
+        defer_idle = (
+            self.mode == Flg.FLG_SERVERLESS_WARM_WAIT
+            and bool(self.getCluster().getBalancer().getRequests())
+        )
 
         for instance in scaler.getRunnableInstances():
             status = instance.getStatus()
@@ -280,7 +294,7 @@ class QueueSimulator:
             if status != Status.ACTIVE and status != Status.WORKING:
                 continue
 
-            if self.mode == Flg.FLG_SERVERLESS and status == Status.ACTIVE:
+            if Flg.is_serverless(self.mode) and status == Status.ACTIVE and not defer_idle:
                 deactivate_step = instance.getLastTime() + serverless_idle_steps
                 if deactivate_step > step:
                     candidates.append(deactivate_step)
@@ -327,7 +341,7 @@ class QueueSimulator:
 
             if busy_slots > 0:
                 instance.CpuCtr += busy_slots * skip_steps
-                if self.mode == Flg.FLG_SERVERLESS:
+                if Flg.is_serverless(self.mode):
                     instance.setLastTime(step + skip_steps - 1)
     
     def getNumOfHotInstance(self):
@@ -545,7 +559,7 @@ class QueueSimulator:
     def createInstance(self, capacity, num_CPU, queue_length, status):
         if self.mode == Flg.FLG_CONTAINER:
             instance = Container(capacity, num_CPU, queue_length, status, self.config)
-        elif self.mode == Flg.FLG_SERVERLESS:
+        elif Flg.is_serverless(self.mode):
             instance = Serverless(capacity, num_CPU, queue_length, status, self.config)
         else:
             raise ValueError("Unsupported instance mode")

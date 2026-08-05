@@ -10,7 +10,7 @@ It advances request arrivals, load balancing, processing, and scale-in/out over 
 
 ## Features
 
-- Two instance modes: **container** (periodic CPU-based autoscaling) and **serverless** (cold start + idle timeout)
+- Three instance modes: **container** (periodic CPU-based autoscaling), **serverless** (cold start per request + idle timeout), and **serverless_warm_wait** (may wait for warm capacity when cold start is expected to be worse)
 - Poisson arrivals and exponential service times
 - Multi-process experiment runner with optional worker auto-tuning
 - Resume support: skips tasks whose result CSV already exists
@@ -22,17 +22,23 @@ It advances request arrivals, load balancing, processing, and scale-in/out over 
 ## Requirements
 
 - Python 3.8+
-- [NumPy](https://numpy.org/)
 
 ```bash
-pip install numpy
+python -m venv venv
+source venv/bin/activate   # Windows: venv\Scripts\activate
+pip install -r requirements.txt
 ```
+
+| Package | Used by |
+|---|---|
+| `numpy` | Simulator (`simulate.py` and core modules) |
+| `pandas` / `matplotlib` | `log_analyze_program/` (analysis and graphs) |
 
 ---
 
 ## Quick Start
 
-1. Edit experiment rows in [`config_list.csv`](config_list.csv).
+1. Edit experiment rows in [`config_list.csv`](config_list.csv) (local file; not tracked in git).
 2. Adjust runtime options in `SETTINGS` at the top of [`simulate.py`](simulate.py) (not environment variables).
 3. Run:
 
@@ -73,6 +79,7 @@ simulate.py
 |---|---|---|---|
 | Container | Periodic CPU utilization vs target | Periodic (keep ≥ 1 hot) | Prefer ACTIVE/WORKING with empty queue |
 | Serverless | Cold start on demand | Idle timer | Hottest warm instance, else cold start |
+| Serverless warm-wait | Cold start only when this request's expected warm wait `p/(W·μ)` > setup time | Idle timer (deferred while balancer has queue) | Hottest warm; else reuse idle SETUP; else wait or cold start |
 
 For algorithms, state machines, and timing models, see [README_JP.md](README_JP.md).
 
@@ -90,7 +97,7 @@ One row = one experiment. Lines starting with `#` are ignored.
 | `limit` | `req` / `time` / `step` |
 | `cluster_cpu` | Cluster CPU capacity limit |
 | `lambda` / `mu` | Arrival rate λ / service rate μ |
-| `instance_flg` | `container` or `serverless` |
+| `instance_flg` | `container` / `serverless` / `serverless_warm_wait` |
 | `default_instance_num` | Instance pool size |
 | `default_start_instances` | Initially ACTIVE instances |
 | `scale_*` / `serverless_timer` | Autoscaling / idle parameters |
@@ -148,7 +155,7 @@ Each task writes three files under `result/`, and the runner appends one summary
 | `config_list.csv` | Experiment definitions |
 | `requests/` | Request traces (generated or reused) |
 | `result/` | Simulation outputs |
-| `program/` | Post-processing / analysis scripts (optional) |
+| `log_analyze_program/` | Post-processing / analysis scripts (optional) |
 
 ---
 
