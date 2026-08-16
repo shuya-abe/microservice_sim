@@ -4,7 +4,6 @@ import matplotlib.ticker as mticker
 import argparse
 import os
 from matplotlib.lines import Line2D
-from mpl_toolkits.axes_grid1.inset_locator import mark_inset
 # import japanize_matplotlib # Removed for English-only output
 
 plt.ioff()
@@ -23,6 +22,7 @@ TRADEOFF_USE_TOTAL_METRICS = True
 TRADEOFF_ADD_PER_TIME_METRICS = True
 TRADEOFF_ADD_LEFT_INSET = True
 TRADEOFF_ADD_BROKEN_X = True
+LEGEND_HANDLE_LENGTH = 4.0
 
 
 def _legend_sort_key(key_tuple):
@@ -30,14 +30,22 @@ def _legend_sort_key(key_tuple):
     itype = str(instance_type).lower()
     is_serverless = itype.startswith('serverless')
     is_container = itype.startswith('container')
+    is_warm_wait = ('warm_wait' in itype) or itype.endswith('_wait')
 
     if SERVERLESS_LEGEND_POSITION == "first":
         serverless_rank = 0 if is_serverless else 1
     else:
         serverless_rank = 1 if is_serverless else 0
 
-    # Among non-serverless, keep container entries before others.
-    type_rank = 0 if is_container else 1
+    # container → serverless → serverless_warm_wait → other
+    if is_container:
+        type_rank = 0
+    elif is_serverless and not is_warm_wait:
+        type_rank = 1
+    elif is_warm_wait:
+        type_rank = 2
+    else:
+        type_rank = 3
 
     try:
         cpu_rank = float(cpu_val)
@@ -183,7 +191,7 @@ def _plot_tradeoff_series(
         if axis_mode == "log" and (not _is_positive_series(series[y_col])):
             continue
 
-        plot_color = color_map.get(cpu_val, 'black')
+        plot_color = color_map[(instance_type, cpu_val)]
         plot_linestyle = linestyle_map.get(instance_type, '-')
         plot_marker = marker_map.get(instance_type, '.')
         series_label = f"{instance_type}, CPU={int(cpu_val) if float(cpu_val).is_integer() else cpu_val}"
@@ -207,7 +215,7 @@ def _plot_tradeoff_series(
         ax.scatter(
             min_row[x_col],
             min_row[y_col],
-            marker='s',
+            marker='*',
             s=72,
             color=plot_color,
             edgecolors='black',
@@ -251,7 +259,7 @@ def _plot_tradeoff_series(
 def _endpoint_legend_handles():
     return [
         Line2D(
-            [0], [0], marker='s', color='none', markerfacecolor='gray',
+            [0], [0], marker='*', color='none', markerfacecolor='gray',
             markeredgecolor='black', markersize=8, label='min lambda in series'
         ),
         Line2D(
@@ -295,6 +303,7 @@ def plot_graphs(csv_filepath):
         'cost_per_time_50', 'energy_per_time_wh_per_sec_50',
         'cost_per_request_50', 'energy_per_request_wh_50',
         'total_cost_50', 'total_energy_wh_50',
+        'ave_instances_50',
     ]
     for col in numeric_plot_cols:
         if col in df.columns:
@@ -314,6 +323,10 @@ def plot_graphs(csv_filepath):
         'total': {'col': 'ave_total_50', 'label': 'ave. of Total time [s]'},
         'wait': {'col': 'ave_wait_50', 'label': 'ave. of Wait time [s]'},
         'service': {'col': 'ave_service_50', 'label': 'ave. of Service time [s]'},
+        'instances': {
+            'col': 'ave_instances_50',
+            'label': 'ave. of Hot Instances',
+        },
         'cost_per_time': {
             'col': 'cost_per_time_50',
             'label': 'Cost per Time [USD/s]',
@@ -345,15 +358,30 @@ def plot_graphs(csv_filepath):
             continue
 
         # --- Style setup ---
-        unique_cpus = sorted(df_mu_filtered['CPU'].dropna().unique())
         unique_instance_types = sorted(df_mu_filtered['instance_type'].unique())
+        unique_series = sorted(
+            df_mu_filtered[['instance_type', 'CPU']]
+            .dropna()
+            .drop_duplicates()
+            .itertuples(index=False, name=None),
+            key=_legend_sort_key,
+        )
+        unique_cpus = sorted(df_mu_filtered['CPU'].dropna().unique())
 
         try:
-            # Prefer colormaps for modern Matplotlib versions
-            available_colors = plt.colormaps['tab10'].colors
+            # Combine categorical palettes to keep instance/CPU series visually distinct.
+            available_colors = (
+                list(plt.colormaps['tab20'].colors)
+                + list(plt.colormaps['tab20b'].colors)
+                + list(plt.colormaps['tab20c'].colors)
+            )
         except AttributeError:
             try:
-                available_colors = plt.cm.get_cmap('tab10').colors
+                available_colors = (
+                    list(plt.cm.get_cmap('tab20').colors)
+                    + list(plt.cm.get_cmap('tab20b').colors)
+                    + list(plt.cm.get_cmap('tab20c').colors)
+                )
             except AttributeError:
                  available_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
                                      '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf'] # Fallback list
@@ -364,8 +392,8 @@ def plot_graphs(csv_filepath):
 
 
         color_map = {
-            cpu_val: available_colors[i % len(available_colors)]
-            for i, cpu_val in enumerate(unique_cpus)
+            series_key: available_colors[i % len(available_colors)]
+            for i, series_key in enumerate(unique_series)
         }
         cpu_index_map = {cpu_val: idx for idx, cpu_val in enumerate(unique_cpus)}
 
@@ -387,6 +415,9 @@ def plot_graphs(csv_filepath):
             y_col_name = config_item['col']
             y_axis_label = config_item['label']
 
+            if y_col_name not in df_mu_filtered.columns:
+                print(f"Skipping mu={mu_val}, type='{plot_key}' because column '{y_col_name}' is absent.")
+                continue
 
             if df_mu_filtered[y_col_name].isnull().all():
                 print(f"Skipping mu={mu_val}, type='{plot_key}' because all '{y_col_name}' values are NaN or missing.")
@@ -399,6 +430,11 @@ def plot_graphs(csv_filepath):
             plot_df = plot_df.dropna(subset=['lambda', 'instance_type', 'CPU', y_col_name])
             # X axis uses lambda values only; keep zero/near-zero Y values for visibility.
             plot_df = plot_df[plot_df['lambda'] > 0]
+
+            if plot_df.empty:
+                print(f"Skipping mu={mu_val}, type='{plot_key}' because no finite points remain after filtering.")
+                plt.close()
+                continue
 
             grouped = plot_df.groupby(['instance_type', 'CPU'], sort=False)
 
@@ -418,7 +454,7 @@ def plot_graphs(csv_filepath):
                 group_data_cleaned = group_data.sort_values(by='lambda')
 
                 if not group_data_cleaned.empty:
-                    plot_color = color_map.get(cpu_val, 'black')
+                    plot_color = color_map[(instance_type, cpu_val)]
                     plot_linestyle = linestyle_map.get(instance_type, '-')
                     plot_marker = marker_map.get(instance_type, '.')
                     cpu_idx = cpu_index_map.get(cpu_val, 0)
@@ -470,7 +506,13 @@ def plot_graphs(csv_filepath):
             ax.ticklabel_format(axis='y', style='sci', scilimits=(-3, 3), useMathText=True)
 
             plt.grid(True, which="both", ls="--", alpha=0.7)
-            plt.legend(title="Series (Instance Type, λ)", bbox_to_anchor=(1.03, 1), loc='upper left', borderaxespad=0.)
+            plt.legend(
+                title="Series (Instance Type, λ)",
+                bbox_to_anchor=(1.03, 1),
+                loc='upper left',
+                borderaxespad=0.,
+                handlelength=LEGEND_HANDLE_LENGTH,
+            )
             plt.subplots_adjust(right=0.75)
 
             mu_val_str = str(mu_val).replace('.', '_')
@@ -655,7 +697,15 @@ def plot_graphs(csv_filepath):
                 labels.extend(['min lambda in series', 'max lambda in series'])
 
                 plt.grid(True, which="both", ls="--", alpha=0.7)
-                plt.legend(handles, labels, title="Series / Endpoints", bbox_to_anchor=(1.03, 1), loc='upper left', borderaxespad=0.)
+                plt.legend(
+                    handles,
+                    labels,
+                    title="Series / Endpoints",
+                    bbox_to_anchor=(1.03, 1),
+                    loc='upper left',
+                    borderaxespad=0.,
+                    handlelength=LEGEND_HANDLE_LENGTH,
+                )
                 plt.subplots_adjust(right=0.75)
 
                 mu_val_str = str(mu_val).replace('.', '_')
@@ -738,14 +788,21 @@ def plot_graphs(csv_filepath):
                             ax_inset.ticklabel_format(axis='both', style='sci', scilimits=(-3, 3), useMathText=True)
 
                         ax_inset.grid(True, which="both", ls="--", alpha=0.5)
-                        mark_inset(ax_main, ax_inset, loc1=2, loc2=4, fc="none", ec="0.4", lw=0.8)
 
                         handles, labels = ax_main.get_legend_handles_labels()
                         handles.extend(_endpoint_legend_handles())
                         labels.extend(['min lambda in series', 'max lambda in series'])
 
                         plt.grid(True, which="both", ls="--", alpha=0.7)
-                        plt.legend(handles, labels, title="Series / Endpoints", bbox_to_anchor=(1.03, 1), loc='upper left', borderaxespad=0.)
+                        plt.legend(
+                            handles,
+                            labels,
+                            title="Series / Endpoints",
+                            bbox_to_anchor=(1.03, 1),
+                            loc='upper left',
+                            borderaxespad=0.,
+                            handlelength=LEGEND_HANDLE_LENGTH,
+                        )
                         plt.subplots_adjust(right=0.75)
                         plt.title(f"Left-zoom inset (max gap ratio={focus_ranges['split_ratio']:.3g})")
 
@@ -832,7 +889,15 @@ def plot_graphs(csv_filepath):
                         handles, labels = ax_left.get_legend_handles_labels()
                         handles.extend(_endpoint_legend_handles())
                         labels.extend(['min lambda in series', 'max lambda in series'])
-                        ax_right.legend(handles, labels, title="Series / Endpoints", bbox_to_anchor=(1.03, 1), loc='upper left', borderaxespad=0.)
+                        ax_right.legend(
+                            handles,
+                            labels,
+                            title="Series / Endpoints",
+                            bbox_to_anchor=(1.03, 1),
+                            loc='upper left',
+                            borderaxespad=0.,
+                            handlelength=LEGEND_HANDLE_LENGTH,
+                        )
 
                         ax_left.set_ylabel(tradeoff_cfg['y_label'])
                         fig.supxlabel(tradeoff_cfg['x_label'])

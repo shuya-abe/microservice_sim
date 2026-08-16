@@ -95,6 +95,7 @@ python analyze_status_with_cost.py <instance_csv> <request_csv> <Hz>
 - 「最後のリクエスト生成時刻までに完了したリクエスト」のうち後半 50/40/30/20/10% を対象
 - 同一設定（`lambda`, `mu`, `servers`, `CPU`, `instance_type`, `step_per_time`）は平均化
 - `*_analysis.csv` が無い入力はコスト/電力列が `N/A`
+- 平均結果算出区間（`window_start_*`〜`window_end_*`）内の**時間加重平均インスタンス数** `ave_instances_*` を出力（`*_num_instance.csv` 優先、無ければ `*_analysis.csv` の `num_instances`）
 - packet 列名は `processedBy` / `processed_by` 両対応
 
 ```bash
@@ -107,7 +108,9 @@ python enhanced_process_result.py <packet_csv> [<packet_csv2> ...] <step_per_tim
 
 ## 4. `generate_graphs.py`
 
-`enhanced_process_result.py` の集約 CSV を入力に、mu ごとの比較グラフを出力します（応答時間・コスト・電力、トレードオフ図など）。
+`enhanced_process_result.py` の集約 CSV を入力に、mu ごとの比較グラフを出力します（応答時間・コスト・電力、平均インスタンス数、トレードオフ図など）。
+
+系列は `(instance_type, CPU)` です。`serverless_warm_wait` も独立系列として描画します。
 
 ```bash
 python generate_graphs.py <rev_result_*.csv>
@@ -116,6 +119,7 @@ python generate_graphs.py <rev_result_*.csv>
 出力例:
 
 - `mu{値}_total.pdf` / `mu{値}_wait.pdf` / `mu{値}_service.pdf`
+- `mu{値}_instances.pdf`（縦軸: 平均ホットインスタンス数、横軸: λ）
 - コスト・電力系 PDF、トレードオフ図（linear / log など）
 
 ---

@@ -32,7 +32,7 @@ def parse_filename(filename_basename):
         r"(\d+)CPU_"                # CPU
         r".*?lambda([\d.eE+-]+)_"   # lambda
         r"mu([\d.eE+-]+)_"          # mu
-        r"([a-zA-Z]+)_"              # platform/container/serverless
+        r"(container|serverless_warm_wait|serverless)_"  # platform
         r"(\d+)_packet\.csv"       # run index
     )
     match = pattern.search(filename_basename)
@@ -95,13 +95,17 @@ def determine_instance_type(df):
     if pb_series_cleaned.empty:
         return determined_instance_type
 
-    has_serverless = pb_series_cleaned.str.startswith("serverless").any()
+    has_warm_wait = pb_series_cleaned.str.startswith("serverless_warm_wait").any()
+    has_plain_serverless = pb_series_cleaned.str.match(r"^serverless\d+$").any()
     has_container = pb_series_cleaned.str.startswith("container").any()
 
-    if has_serverless and has_container:
+    type_flags = sum([has_warm_wait, has_plain_serverless, has_container])
+    if type_flags > 1:
         return "hybrid"
-    if has_serverless:
-        return "serverless" if pb_series_cleaned.str.startswith("serverless").all() else "other"
+    if has_warm_wait:
+        return "serverless_warm_wait" if pb_series_cleaned.str.startswith("serverless_warm_wait").all() else "other"
+    if has_plain_serverless:
+        return "serverless" if pb_series_cleaned.str.match(r"^serverless\d+$").all() else "other"
     if has_container:
         return "container" if pb_series_cleaned.str.startswith("container").all() else "other"
     return determined_instance_type
@@ -126,16 +130,95 @@ def read_analysis_csv_for_packet(packet_csv_path):
     if "time" in analysis_df.columns:
         analysis_df["time"] = pd.to_numeric(analysis_df["time"], errors="coerce")
 
-    for col in ["cost_a_step", "cost_b_step", "total_power_wh", "total_power_w"]:
+    for col in ["cost_a_step", "cost_b_step", "total_power_wh", "total_power_w", "num_instances"]:
         if col in analysis_df.columns:
             analysis_df[col] = pd.to_numeric(analysis_df[col], errors="coerce")
 
     return analysis_df
 
 
-def compute_window_cost_power_metrics(analysis_df, window_start, window_end, num_reqs):
+def read_num_instance_csv_for_packet(packet_csv_path):
+    """対応する *_num_instance.csv を読み込みます。存在しない場合は None を返します。"""
+    num_instance_path = packet_csv_path.replace("_packet.csv", "_num_instance.csv")
+    if num_instance_path == packet_csv_path:
+        num_instance_path = packet_csv_path.rsplit(".", 1)[0] + "_num_instance.csv"
+
+    if not os.path.exists(num_instance_path):
+        return None
+
+    try:
+        ni_df = pd.read_csv(num_instance_path)
+    except Exception as e:
+        print(f"警告: num_instance CSV 読み込み失敗: {num_instance_path} - {e}")
+        return None
+
+    time_col = "sim_time" if "sim_time" in ni_df.columns else ("time" if "time" in ni_df.columns else None)
+    count_col = (
+        "num_hot_instances" if "num_hot_instances" in ni_df.columns
+        else ("num_instances" if "num_instances" in ni_df.columns else None)
+    )
+    if time_col is None or count_col is None:
+        return None
+
+    out = pd.DataFrame({
+        "time": pd.to_numeric(ni_df[time_col], errors="coerce"),
+        "num_instances": pd.to_numeric(ni_df[count_col], errors="coerce"),
+    }).dropna()
+    return out.sort_values("time").reset_index(drop=True)
+
+
+def time_weighted_average_instances(change_df, window_start, window_end):
     """
-    window_start から window_end の区間で、コスト・電力量指標を計算します。
+    変化点ログ（time, num_instances）から、[window_start, window_end] の時間加重平均台数を計算します。
+    num_instances[i] は time[i] 以降、次の変化点まで一定とみなします。
+    """
+    if (
+        change_df is None or change_df.empty
+        or pd.isna(window_start) or pd.isna(window_end)
+        or float(window_end) <= float(window_start)
+    ):
+        return np.nan
+
+    times = change_df["time"].to_numpy(dtype=float)
+    values = change_df["num_instances"].to_numpy(dtype=float)
+    w0 = float(window_start)
+    w1 = float(window_end)
+
+    # value in effect at w0: last change at or before w0, else first known value
+    idx = int(np.searchsorted(times, w0, side="right") - 1)
+    if idx < 0:
+        if times[0] >= w1:
+            return np.nan
+        current_value = float(values[0])
+        cursor = max(w0, float(times[0]))
+        idx = 0
+    else:
+        current_value = float(values[idx])
+        cursor = w0
+
+    integral = 0.0
+    while cursor < w1:
+        next_change = float(times[idx + 1]) if (idx + 1) < len(times) else w1
+        segment_end = min(w1, next_change)
+        if segment_end > cursor:
+            integral += current_value * (segment_end - cursor)
+            cursor = segment_end
+        if cursor >= w1:
+            break
+        idx += 1
+        if idx >= len(values):
+            break
+        current_value = float(values[idx])
+
+    elapsed = w1 - w0
+    if elapsed <= 0:
+        return np.nan
+    return integral / elapsed
+
+
+def compute_window_cost_power_metrics(analysis_df, window_start, window_end, num_reqs, num_instance_df=None):
+    """
+    window_start から window_end の区間で、コスト・電力量・平均インスタンス数を計算します。
     区間以前の課金/電力消費は無かったものとして扱います（区間内積算のみ）。
     """
     result = {
@@ -148,6 +231,7 @@ def compute_window_cost_power_metrics(analysis_df, window_start, window_end, num
         "window_cost_per_request": np.nan,
         "window_energy_per_request_wh": np.nan,
         "window_avg_cpu_utilization": np.nan,
+        "window_ave_instances": np.nan,
     }
 
     if pd.isna(window_start) or pd.isna(window_end):
@@ -158,6 +242,17 @@ def compute_window_cost_power_metrics(analysis_df, window_start, window_end, num
         return result
 
     result["window_elapsed_time"] = elapsed
+
+    # Prefer dedicated num_instance change log; fall back to analysis num_instances.
+    if num_instance_df is not None and not num_instance_df.empty:
+        result["window_ave_instances"] = time_weighted_average_instances(
+            num_instance_df, window_start, window_end
+        )
+    elif analysis_df is not None and "time" in analysis_df.columns and "num_instances" in analysis_df.columns:
+        change_df = analysis_df[["time", "num_instances"]].dropna().sort_values("time")
+        result["window_ave_instances"] = time_weighted_average_instances(
+            change_df, window_start, window_end
+        )
 
     if analysis_df is None or "time" not in analysis_df.columns:
         return result
@@ -261,6 +356,7 @@ def process_csv_file(filepath):
         print(f"ステップ1フィルタ後にデータがありません: {filepath}")
 
     analysis_df = read_analysis_csv_for_packet(filepath)
+    num_instance_df = read_num_instance_csv_for_packet(filepath)
     sorted_for_extract = df_step1_filtered.sort_values(by="end", ascending=False)
 
     calculated_stats = {"instance_type": determined_instance_type}
@@ -296,6 +392,7 @@ def process_csv_file(filepath):
             window_start=window_start,
             window_end=window_end,
             num_reqs=num_extracted,
+            num_instance_df=num_instance_df,
         )
 
         calculated_stats[f"elapsed_time_{p_suffix}"] = window_metrics["window_elapsed_time"]
@@ -313,6 +410,7 @@ def process_csv_file(filepath):
         calculated_stats[f"avg_cpu_utilization_{p_suffix}"] = window_metrics[
             "window_avg_cpu_utilization"
         ]
+        calculated_stats[f"ave_instances_{p_suffix}"] = window_metrics["window_ave_instances"]
 
     print(f"--- {filepath} の処理終了 ---")
     return calculated_stats
@@ -343,6 +441,7 @@ def aggregate_rows_by_config(rows, step_per_time):
         "total_cost", "total_energy_wh",
         "cost_per_time", "energy_per_time_wh_per_sec", "average_power_w",
         "cost_per_request", "energy_per_request_wh", "avg_cpu_utilization",
+        "ave_instances",
     ]
 
     for key, members in grouped.items():
@@ -407,13 +506,18 @@ def main():
             print(f"情報: {filename_basename} は処理エラーのためスキップします。")
             continue
 
+        instance_type = processing_results.get("instance_type", "N/A")
+        platform = parsed_name_info.get("platform")
+        if platform in ("serverless_warm_wait", "container", "serverless"):
+            instance_type = platform
+
         row = {
             "datetime": parsed_name_info["datetime"],
             "lambda": parsed_name_info["lambda"],
             "mu": parsed_name_info["mu"],
             "servers": parsed_name_info["servers"],
             "CPU": parsed_name_info["CPU"],
-            "instance_type": processing_results.get("instance_type", "N/A"),
+            "instance_type": instance_type,
             "step_per_time": step_per_time,
         }
 
@@ -434,7 +538,7 @@ def main():
                 "window_start", "window_end", "elapsed_time",
                 "total_cost", "total_energy_wh",
                 "cost_per_time", "energy_per_time_wh_per_sec", "average_power_w",
-                "cost_per_request", "energy_per_request_wh",
+                "cost_per_request", "energy_per_request_wh", "ave_instances",
             ]:
                 row[f"{extra_prefix}_{p_sfx}"] = processing_results.get(
                     f"{extra_prefix}_{p_sfx}", np.nan
@@ -460,7 +564,7 @@ def main():
         "window_start", "window_end", "elapsed_time",
         "total_cost", "total_energy_wh",
         "cost_per_time", "energy_per_time_wh_per_sec", "average_power_w",
-        "cost_per_request", "energy_per_request_wh",
+        "cost_per_request", "energy_per_request_wh", "ave_instances",
     ]:
         for sfx in PERCENTAGE_SUFFIXES:
             ordered_metric_columns.append(f"{prefix}_{sfx}")

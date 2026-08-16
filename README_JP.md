@@ -70,6 +70,19 @@ simulate.py
 
 ## 2. 実行方法
 
+### 依存関係のインストール
+
+```bash
+python -m venv venv
+source venv/bin/activate   # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+- シミュレータ本体: `numpy`
+- `log_analyze_program/`: `pandas`, `matplotlib`
+
+### シミュレーション実行
+
 ```bash
 python simulate.py
 ```
@@ -163,6 +176,16 @@ Sender.runStep
 
 1. **hottest**: ACTIVE かつキュー長 0 のうち、`last_time` が最大のものを選ぶ  
 2. いなければ **coldStart**: Scaler 経由で INACTIVE を起動し、そのインスタンスへ割当  
+
+#### サーバレス warm-wait モード（`FLG_SERVERLESS_WARM_WAIT` / `instance_flg=serverless_warm_wait`）
+
+スケールパーリクエストのコールドスタートを常に行う代わりに、セットアップ時間 `S`・当該リクエストのバランサー内位置 `p`・サービス率 `μ`・ウォーム CPU スロット数 `W` から
+
+```
+expected_wait ≈ p / (W * μ)
+```
+
+を見積もり、`expected_wait ≤ S`（すなわち `p ≤ S·W·μ`）ならコールドスタートせずウォーム空きを待つ。空きのない SETUP があればそこへ割当。`W=0` のときは従来どおりコールドスタートする。バランサーに未割当がある間はアイドル停止を延期する。 
 
 ### 4.4 スケーリング（`Scaler`）
 
@@ -321,7 +344,7 @@ CSV 行から全パラメータを構築し、入出力パスを決定します�
 | 9 | `scale_interval` | コンテナのスケールチェック間隔（論理時間） |
 | 10 | `scale_target` | 目標 CPU 利用率 |
 | 11 | `serverless_timer` | サーバレスのアイドル停止時間（論理時間） |
-| 12 | `instance_flg` | `container` / `serverless` |
+| 12 | `instance_flg` | `container` / `serverless` / `serverless_warm_wait`（別名 `serverless_wait`） |
 | 13 | `default_flg` | 真なら同一スペックを `default_instance_num` 台生成 |
 | 14 | `default_instance_num` | 生成台数上限（プールサイズ） |
 | 15 | `default_start_instances` | 初期 ACTIVE 台数 |
@@ -461,7 +484,7 @@ CSV 行から全パラメータを構築し、入出力パスを決定します�
   └─ SIM_DEFAULT_OUTPUT_FILE にサマリ 1 行追記
 ```
 
-> 注: `result/` 配下の `*_analysis.csv` や `rev_result_*.csv` などは、本ディレクトリ直下のシミュレータ本体ではなく、`program/` 内の後処理スクリプト由来の成果物です。
+> 注: `result/` 配下の `*_analysis.csv` や `rev_result_*.csv` などは、本ディレクトリ直下のシミュレータ本体ではなく、`log_analyze_program/` 内の後処理スクリプト由来の成果物です。
 
 ---
 
@@ -482,7 +505,7 @@ CSV 行から全パラメータを構築し、入出力パスを決定します�
 |---|---|
 | `FLG_DEFAULT` / `FLG_VERBOSE` | 出力詳細度 |
 | `FLG_OUTPUT` / `FLG_INPUT` | リクエスト生成 vs 既存ファイル利用の意図 |
-| `FLG_CONTAINER` / `FLG_SERVERLESS` | インスタンス種別 |
+| `FLG_CONTAINER` / `FLG_SERVERLESS` / `FLG_SERVERLESS_WARM_WAIT` | インスタンス種別 |
 
 ### `status.py` — リクエスト / インスタンス状態
 

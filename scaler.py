@@ -18,7 +18,7 @@ class Scaler:
     def runStep(self, timestep):
         if self.mode == Flg.FLG_CONTAINER:
             self.runStep4Container(timestep)
-        elif self.mode == Flg.FLG_SERVERLESS:
+        elif Flg.is_serverless(self.mode):
             self.runStep4Serverless(timestep)
     
     def runStep4Container(self, timestep):
@@ -36,8 +36,15 @@ class Scaler:
         return
     
     def runStep4Serverless(self, timestep):
+        # In warm-wait mode, keep warm instances while requests are queued at the balancer.
+        defer_idle = (
+            self.mode == Flg.FLG_SERVERLESS_WARM_WAIT
+            and bool(self.getBalancer().getRequests())
+        )
         for instance in self.getRunnableInstances():
             if instance.getStatus() == Status.ACTIVE:
+                if defer_idle:
+                    continue
                 if timestep - instance.getLastTime() >= self.config.CONFIG_SERVERLESS_TIMER * self.config.SIM_STEP_PER_TIME:
                     self.deactivateOldInstance(instance)
     
