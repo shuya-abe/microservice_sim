@@ -13,6 +13,12 @@ from sender import Sender
 from status import Status
 from container import Container
 from serverless import Serverless
+from steady_state import (
+    BatchAccumulator,
+    consecutive_stable,
+    merge_batches,
+    _z_from_ci_level,
+)
 import datetime
 import os
 import math
@@ -52,6 +58,15 @@ class QueueSimulator:
         
         self.mode = self.config.CONFIG_INSTANCE_FLG
         self.enable_hybrid_skip = bool(getattr(self.config, "SIM_ENABLE_HYBRID_SKIP", True))
+        self.enable_scale_check_skip = bool(getattr(self.config, "SIM_ENABLE_SCALE_CHECK_SKIP", True))
+        self.steady_enabled = bool(getattr(self.config, "STEADY_ENABLED", False))
+        self.steady_batches = []
+        self.steady_acc = None
+        self.steady_result = None
+        self.steady_reached = False
+        self.steady_z = _z_from_ci_level(float(getattr(self.config, "STEADY_CI_LEVEL", 0.95)))
+        self._packet_streamed = False
+        self.num_reqs = 0
 
         self.addCluster(Cluster(config))
         balancer = Balancer(config)
@@ -73,27 +88,23 @@ class QueueSimulator:
         self.setStep(0)
         
         self.CONFIG_REQUEST_FILE = config.CONFIG_REQUEST_FILE
-        
-        # if (limit == Limit.LIMIT_TIME):
-        #     self.CONFIG_REQUEST_FILE = "./requests/" + str(threshold) + "sec" + "_lambda" + str(_lambda) + "_mu" + str(mu) + ".csv"
-        # elif (limit == Limit.LIMIT_TIMESTEP):
-        #     self.CONFIG_REQUEST_FILE = "./requests/" + str(threshold) + "step" + "_lambda" + str(_lambda) + "_mu" + str(mu) + ".csv"
-        # elif (limit == Limit.LIMIT_REQUEST):
-        #     self.CONFIG_REQUEST_FILE = "./requests/" + str(threshold) + "reqs" + "_lambda" + str(_lambda) + "_mu" + str(mu) + ".csv"
-        # else:
-        #     self.CONFIG_REQUEST_FILE = "./requests/" + str(threshold) + "sec" + "_lambda" + str(_lambda) + "_mu" + str(mu) + ".csv"
 
+        # Shared arrival stream: same (threshold, λ, μ, sim_index) file is reused
+        # across system configs. Steady mode may later append extra rows to it.
         if os.path.isfile(self.CONFIG_REQUEST_FILE):
-            reqs = generator.inputRequests(self.CONFIG_REQUEST_FILE)
+            generator.inputRequests(self.CONFIG_REQUEST_FILE)
         else:
-            reqs = generator.createAllRequests(limit, threshold)
+            generator.createAllRequests(limit, threshold)
             generator.outputRequests(self.CONFIG_REQUEST_FILE)
 
-        sender.setRequests(reqs, step_per_time)
+        for req in generator.reqs:
+            req.setStartTime(math.ceil(req.getStartTime() * step_per_time) / step_per_time)
+        sender.reqs = generator.reqs
 
-        time = sender.reqs[0].getStartTime()
-        sender.setNextRequestTime(time)
-        self.next_request_time = time
+        if sender.reqs:
+            time0 = sender.reqs[0].getStartTime()
+            sender.setNextRequestTime(time0)
+            self.next_request_time = time0
         
         outfile = self.config.OUTPUT_FILE_PACKET
         with open(outfile, 'w', newline='') as f:
@@ -141,11 +152,11 @@ class QueueSimulator:
             writer = csv.writer(f)
             writer.writerow(["sim_time", "step", "num_hot_instances"])
         
-            # balancer = self.getCluster().getBalancer()
-            # before_instances = balancer.getNumOfInstances()
             before_instances = -1
-            
-            if limit == Limit.LIMIT_DEFAULT:
+
+            if self.steady_enabled:
+                self._startSimulateSteady(writer, before_instances)
+            elif limit == Limit.LIMIT_DEFAULT:
                 return
             elif limit == Limit.LIMIT_REQUEST:
                 while(threshold > self.countReqs()):
@@ -160,12 +171,115 @@ class QueueSimulator:
                 return
 
         return
-    
+
+    def _startSimulateSteady(self, writer, before_instances):
+        batch_reqs = int(self.config.STEADY_BATCH_REQS)
+        batch_min_time = float(self.config.STEADY_BATCH_MIN_TIME)
+        max_batches = int(self.config.STEADY_MAX_BATCHES)
+        consecutive = int(self.config.STEADY_CONSECUTIVE)
+        rel_tol = float(self.config.STEADY_REL_TOL)
+
+        sim_time = self.getTime()
+        hot = self.getNumOfHotInstance()
+        self.steady_acc = BatchAccumulator(t0=sim_time)
+        self.steady_acc.note_instances(sim_time, hot)
+        self.steady_batches = []
+        self.steady_reached = False
+
+        while True:
+            before_instances = self.simulateStepWrapper(writer, before_instances)
+            sim_time = self.getTime()
+            hot = before_instances
+            self.steady_acc.note_instances(sim_time, hot)
+
+            if (
+                self.steady_acc.lifetimes.n >= batch_reqs
+                and (sim_time - self.steady_acc.t0) >= batch_min_time
+            ):
+                batch = self.steady_acc.finalize(sim_time, self.steady_z)
+                self.steady_batches.append(batch)
+                batch_idx = len(self.steady_batches)
+                emitted = False
+                try:
+                    from worker_progress import emit_progress
+
+                    emitted = emit_progress(
+                        {
+                            "type": "steady_batch",
+                            "sim_index": getattr(self.config, "TASK_SIM_INDEX", None),
+                            "config_index": getattr(self.config, "TASK_CONFIG_INDEX", None),
+                            "batch": batch_idx,
+                            "n": int(batch["n"]),
+                            "elapsed": float(batch["elapsed"]),
+                            "ex_time_total": float(batch["ex_time_total"]),
+                            "ex_time_wait": float(batch["ex_time_wait"]),
+                            "ave_instances": float(batch["ave_instances"]),
+                            "lambda": float(self._lambda),
+                            "mu": float(self.mu),
+                        }
+                    )
+                except Exception:
+                    emitted = False
+                if not emitted:
+                    print(
+                        f"[steady] batch={batch_idx} n={batch['n']} "
+                        f"elapsed={batch['elapsed']:.3f} "
+                        f"total={batch['ex_time_total']:.6g} wait={batch['ex_time_wait']:.6g} "
+                        f"instances={batch['ave_instances']:.4g}",
+                        flush=True,
+                    )
+
+                if consecutive_stable(self.steady_batches, consecutive, rel_tol):
+                    self.steady_reached = True
+                    self.steady_result = merge_batches(
+                        self.steady_batches[-consecutive:], self.steady_z
+                    )
+                    break
+
+                if len(self.steady_batches) >= max_batches:
+                    self.steady_reached = False
+                    k = min(consecutive, len(self.steady_batches))
+                    self.steady_result = merge_batches(self.steady_batches[-k:], self.steady_z)
+                    break
+
+                self.steady_acc = BatchAccumulator(t0=sim_time)
+                self.steady_acc.note_instances(sim_time, hot)
+
+    def ensureOnlineArrivals(self, until_logical_time=None):
+        if not self.steady_enabled:
+            return
+        generator = self.getGenerator()
+        sender = self.getSender()
+        if until_logical_time is None:
+            until_logical_time = self.getTime() + max(
+                float(self.config.STEADY_BATCH_MIN_TIME) * 0.1,
+                10.0 / max(self._lambda, 1e-12),
+            )
+
+        if sender.reqs and sender.reqs[-1].getStartTime() >= until_logical_time:
+            return
+
+        added = generator.extendUntil(self.CONFIG_REQUEST_FILE, until_logical_time)
+        for req in added:
+            req.setStartTime(
+                math.ceil(req.getStartTime() * self.step_per_time) / self.step_per_time
+            )
+        if sender.reqs is not generator.reqs:
+            already_sent = sender.request_ptr
+            sender.reqs = generator.reqs
+            sender.request_ptr = min(already_sent, len(sender.reqs))
+
+        # Drop already-dispatched arrivals to bound memory (the CSV stays complete).
+        if sender.request_ptr > 10000:
+            del sender.reqs[:sender.request_ptr]
+            sender.request_ptr = 0
+
     def simulateStepWrapper(self, writer, before_instances):
+        if self.steady_enabled:
+            self.ensureOnlineArrivals()
         if self.enable_hybrid_skip:
             self.fastForwardIdleSteps()
         self.simulateStep()
-        # num_instances = balancer.getNumOfInstances()
         num_instances = self.getNumOfHotInstance()
         step = self.getStep()
         simtime = step / self.getStepPerTime()
@@ -176,6 +290,9 @@ class QueueSimulator:
         return num_instances
 
     def fastForwardIdleSteps(self):
+        if self.steady_enabled:
+            # Generate far enough for the next hybrid-skip horizon.
+            self.ensureOnlineArrivals(self.getTime() + float(self.config.STEADY_BATCH_MIN_TIME))
         step = self.getStep()
         if self.hasImmediateEvent(step):
             return
@@ -207,7 +324,8 @@ class QueueSimulator:
                 return True
 
         if self.mode == Flg.FLG_CONTAINER and scaler.isTime2Check(step):
-            return True
+            if not self.enable_scale_check_skip or scaler.containerScaleCheckNeeded():
+                return True
 
         serverless_idle_steps = self.config.CONFIG_SERVERLESS_TIMER * self.config.SIM_STEP_PER_TIME
         defer_idle = (
@@ -248,11 +366,19 @@ class QueueSimulator:
 
     def getNextArrivalStep(self):
         sender = self.getSender()
-        if sender.request_ptr >= sender.countReqs():
-            return None
-        time_start = sender.reqs[sender.request_ptr].getStartTime()
-        return int(round(time_start * self.step_per_time))
-
+        if sender.request_ptr < sender.countReqs():
+            time_start = sender.reqs[sender.request_ptr].getStartTime()
+            return int(round(time_start * self.step_per_time))
+        if self.steady_enabled:
+            generator = self.getGenerator()
+            next_t = generator.next_arrival_time
+            if next_t is None:
+                last = generator.last_start_time
+                if last is None:
+                    return None
+                return int(round(last * self.step_per_time)) + 1
+            return int(round(next_t * self.step_per_time))
+        return None
     def getNextEventStep(self, step):
         scaler = self.getCluster().getScaler()
         candidates = []
@@ -263,7 +389,9 @@ class QueueSimulator:
 
         if self.mode == Flg.FLG_CONTAINER:
             interval = self.config.CONFIG_SCALE_INTERVAL * self.config.SIM_STEP_PER_TIME
-            if interval > 0:
+            if interval > 0 and (
+                not self.enable_scale_check_skip or scaler.containerScaleCheckNeeded()
+            ):
                 rem = step % interval
                 next_check = step + (interval - rem)
                 if rem == 0:
@@ -376,8 +504,9 @@ class QueueSimulator:
         return
     
     def endSimulate(self, flg):
+        import time as wall_time
         print("==SIMULATION FINISHED==")
-        print("exec time (sec): %f" % (time.time() - self.sim_timer))
+        print("exec time (sec): %f" % (wall_time.time() - self.sim_timer))
         self.outputConfig()
         total, total_wait = self.calcTotalTimeVerbose()
         return self.outputResult(total, total_wait)
@@ -432,8 +561,12 @@ class QueueSimulator:
     def calcTotalTimeVerbose(self):
         total = 0.
         total_wait = 0.
-        # print("---PACKET---")
         outfile = self.config.OUTPUT_FILE_PACKET
+
+        # Steady mode already streams packet rows during registerReqs.
+        if self.steady_enabled and getattr(self, "_packet_streamed", False):
+            return total, total_wait
+
         with open(outfile, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(["id", "processed_by", "workload", "start", "end", "time_lifetime", "time_wait", "time_service"])
@@ -455,36 +588,86 @@ class QueueSimulator:
             return id, processedBy, workload, start, end, time_lifetime, time_wait
 
     def outputResult(self, total, total_wait):
-        balancer = self.cluster.getBalancer()
-
-        # count_is_process = 0.
-        # for is_process_step in self.list_is_process:
-        #     for is_process_instance in is_process_step:
-        #         if is_process_instance:
-        #             count_is_process += 1
-
-        # num_reqs = len(self.reqs)
         num_reqs = self.countReqs()
         num_steps = self.getStep()
         total_time = self.getTime()
-        ex_time_service = (total - total_wait) / num_reqs
-        # ex_rho = count_is_process / (num_steps * len(balancer.getInstances()))
-        ex_time_wait = total_wait/num_reqs
-        ex_time_total = total/num_reqs
+
+        if self.steady_enabled and self.steady_result is not None:
+            sr = self.steady_result
+            ex_time_service = sr["ex_time_service"]
+            ex_time_wait = sr["ex_time_wait"]
+            ex_time_total = sr["ex_time_total"]
+            steady_reached = self.steady_reached
+            num_batches = len(self.steady_batches)
+            steady_batch_index = num_batches
+            steady_start = sr["t0"]
+            steady_end = sr["t1"]
+            ci_total_low = sr["ci_total_low"]
+            ci_total_high = sr["ci_total_high"]
+            ci_wait_low = sr["ci_wait_low"]
+            ci_wait_high = sr["ci_wait_high"]
+            ci_service_low = sr["ci_service_low"]
+            ci_service_high = sr["ci_service_high"]
+            ave_instances_steady = sr["ave_instances"]
+            # Report completions that contributed to the adopted steady window.
+            reported_reqs = sr["n"]
+        else:
+            if num_reqs <= 0:
+                ex_time_service = float("nan")
+                ex_time_wait = float("nan")
+                ex_time_total = float("nan")
+            else:
+                ex_time_service = (total - total_wait) / num_reqs
+                ex_time_wait = total_wait / num_reqs
+                ex_time_total = total / num_reqs
+            steady_reached = False
+            num_batches = 0
+            steady_batch_index = 0
+            steady_start = float("nan")
+            steady_end = float("nan")
+            ci_total_low = float("nan")
+            ci_total_high = float("nan")
+            ci_wait_low = float("nan")
+            ci_wait_high = float("nan")
+            ci_service_low = float("nan")
+            ci_service_high = float("nan")
+            ave_instances_steady = float("nan")
+            reported_reqs = num_reqs
 
         print("---RESULT---")
-        print("TOTAL SIM TIME: %d" % total_time)
+        print("TOTAL SIM TIME: %s" % total_time)
         print("TOTAL SIM STEP: %d" % num_steps)
-        print("TOTAL REQUEST: %d" % num_reqs)
-        # print("RHO: (ideal) %f, (ex) %f" % (ideal_rho, ex_rho))
-        # print("SERVICE TIME: (ideal) %f, (ex) %f" % (ideal_time_service, ex_time_service))
-        # print("WAIT TIME: (ideal) %f, (ex) %f" % (ideal_time_wait, ex_time_wait))
-        # print("Cluster TIME: (ideal) %f, (ex) %f" % (ideal_time_total, ex_time_total))
-        # print("RHO: (ex) %f" % (ex_rho))
+        print("TOTAL REQUEST: %d" % (self.num_reqs if self.steady_enabled else num_reqs))
+        if self.steady_enabled:
+            print("STEADY REACHED: %s (batches=%d)" % (steady_reached, num_batches))
+            print("STEADY WINDOW: [%s, %s]" % (steady_start, steady_end))
+            print("STEADY AVE INSTANCES: %s" % (ave_instances_steady,))
         print("SERVICE TIME: (ex) %f" % (ex_time_service))
         print("WAIT TIME: (ex) %f" % (ex_time_wait))
         print("Cluster TIME: (ex) %f" % (ex_time_total))
 
+        result_row = [
+            self.step_per_time,
+            total_time,
+            num_steps,
+            reported_reqs if self.steady_enabled else num_reqs,
+            ex_time_service,
+            ex_time_wait,
+            ex_time_total,
+            bool(self.steady_enabled),
+            bool(steady_reached),
+            num_batches,
+            steady_batch_index,
+            steady_start,
+            steady_end,
+            ci_total_low,
+            ci_total_high,
+            ci_wait_low,
+            ci_wait_high,
+            ci_service_low,
+            ci_service_high,
+            ave_instances_steady,
+        ]
 
         summary_row = [
             datetime.datetime.now(),
@@ -497,37 +680,62 @@ class QueueSimulator:
             self.step_per_time,
             total_time,
             num_steps,
-            num_reqs,
+            reported_reqs if self.steady_enabled else num_reqs,
             ex_time_service,
             ex_time_wait,
             ex_time_total,
+            bool(self.steady_enabled),
+            bool(steady_reached),
+            num_batches,
+            steady_batch_index,
+            steady_start,
+            steady_end,
+            ci_total_low,
+            ci_total_high,
+            ci_wait_low,
+            ci_wait_high,
+            ci_service_low,
+            ci_service_high,
+            ave_instances_steady,
         ]
 
         return {
-            "result": [total_time, num_steps, num_reqs, ex_time_service, ex_time_wait, ex_time_total],
+            "result": result_row[1:],  # legacy-ish without step_per_time for older callers
+            "result_row": result_row,
             "summary_output_file": self.config.SIM_DEFAULT_OUTPUT_FILE,
             "summary_row": summary_row,
         }
     
     def registerReqs(self, reqs):
-        self.reqs.extend(reqs)
-        
-        # outfile = self.config.OUTPUT_FILE_PACKET
-        # with open(outfile, 'a', newline='') as f:
-        #     writer = csv.writer(f)
-        #     # writer.writerow(["id", "processedBy", "workload", "start", "end", "time_lifetime", "time_wait", "time_service"])
-        #     for req in reqs:
-        #         id, processedBy, workload, start, end, time_lifetime, time_wait = self.calcResultPacket(req)
-        #         writer.writerow([id, processedBy, workload, start, end, time_lifetime, time_wait, time_lifetime - time_wait])
-        #         self.total += time_lifetime
-        #         self.total_wait += time_wait
-        #         self.num_reqs += 1
-        #     f.flush()
+        if self.steady_enabled:
+            self._packet_streamed = True
+            outfile = self.config.OUTPUT_FILE_PACKET
+            with open(outfile, 'a', newline='') as f:
+                writer = csv.writer(f)
+                for req in reqs:
+                    id, processedBy, workload, start, end, time_lifetime, time_wait = self.calcResultPacket(req)
+                    writer.writerow([
+                        id, processedBy, workload, start, end,
+                        time_lifetime, time_wait, time_lifetime - time_wait,
+                    ])
+                    self.num_reqs += 1
+                    if self.steady_acc is not None:
+                        self.steady_acc.add_completion(
+                            time_lifetime, time_wait, time_lifetime - time_wait
+                        )
+            return
 
+        self.reqs.extend(reqs)
+        if self.steady_acc is not None:
+            for req in reqs:
+                lifetime = req.getLifetime()
+                wait = req.getWaitTime()
+                self.steady_acc.add_completion(lifetime, wait, lifetime - wait)
 
     def countReqs(self):
+        if self.steady_enabled:
+            return int(self.num_reqs)
         return len(self.reqs)
-        # return self.num_reqs
     
     def setLimit(self, limit):
         self.limit = limit

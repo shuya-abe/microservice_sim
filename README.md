@@ -12,6 +12,7 @@ It advances request arrivals, load balancing, processing, and scale-in/out over 
 
 - Three instance modes: **container** (periodic CPU-based autoscaling), **serverless** (cold start per request + idle timeout), and **serverless_warm_wait** (may wait for warm capacity when cold start is expected to be worse)
 - Poisson arrivals and exponential service times
+- Optional **steady-state detection**: hybrid request/time batches with 95% CIs until consecutive batches stabilize. Arrival traces stay shared: the same `(threshold, λ, μ, repeat index)` CSV is reused across system configs, and extra arrivals are appended to that file when a run needs a longer stream.
 - Multi-process experiment runner with optional worker auto-tuning
 - Resume support: skips tasks whose result CSV already exists
 - Hybrid event-driven step skipping for faster long runs

@@ -11,6 +11,43 @@ PERCENTAGE_SUFFIXES = ["50", "40", "30", "20", "10"]
 PERCENTAGE_DECIMALS = [0.5, 0.4, 0.3, 0.2, 0.1]
 
 
+def companion_result_path(packet_csv_path):
+    """Map *_packet.csv -> *_result.csv."""
+    if packet_csv_path.endswith("_packet.csv"):
+        return packet_csv_path[: -len("_packet.csv")] + "_result.csv"
+    return packet_csv_path.rsplit(".", 1)[0] + "_result.csv"
+
+
+def read_steady_window_from_result(packet_csv_path):
+    """
+    If the simulator wrote steady_start/steady_end on the companion result CSV,
+    return (start, end, result_row_dict). Otherwise (None, None, None).
+    """
+    result_path = companion_result_path(packet_csv_path)
+    if not os.path.exists(result_path):
+        return None, None, None
+    try:
+        rdf = pd.read_csv(result_path)
+    except Exception as e:
+        print(f"警告: result CSV 読み込み失敗: {result_path} - {e}")
+        return None, None, None
+    if rdf.empty:
+        return None, None, None
+    row = rdf.iloc[0].to_dict()
+    if "steady_start" not in rdf.columns or "steady_end" not in rdf.columns:
+        return None, None, None
+    start = pd.to_numeric(row.get("steady_start"), errors="coerce")
+    end = pd.to_numeric(row.get("steady_end"), errors="coerce")
+    if pd.isna(start) or pd.isna(end):
+        return None, None, None
+    enabled = row.get("steady_enabled", True)
+    if isinstance(enabled, str) and enabled.strip().lower() in ("false", "0", "no"):
+        return None, None, None
+    if enabled is False or enabled == 0:
+        return None, None, None
+    return float(start), float(end), row
+
+
 def round_to_significant_figures(number, sig_figs):
     """指定された数値を有効数字sig_figs桁に丸めます。NaNや0はそのまま返します。"""
     if pd.isna(number) or number == 0:
@@ -357,9 +394,71 @@ def process_csv_file(filepath):
 
     analysis_df = read_analysis_csv_for_packet(filepath)
     num_instance_df = read_num_instance_csv_for_packet(filepath)
-    sorted_for_extract = df_step1_filtered.sort_values(by="end", ascending=False)
-
     calculated_stats = {"instance_type": determined_instance_type}
+
+    steady_start, steady_end, steady_row = read_steady_window_from_result(filepath)
+    if steady_start is not None and steady_end is not None:
+        # Simulator already decided the steady window: one set of metrics, no %-tail.
+        calculated_stats["steady_mode"] = True
+        win = df[(df["end"] >= steady_start) & (df["end"] <= steady_end)].copy()
+        if win.empty:
+            win = df[(df["start"] >= steady_start) & (df["end"] <= steady_end)].copy()
+        num_extracted = len(win)
+        if num_extracted > 0:
+            ave_total = float(win["time_lifetime"].mean())
+            ave_wait = float(win["time_wait"].mean())
+            ave_service = float(win["time_service"].mean())
+            window_start = float(win["start"].min())
+            window_end = float(win["end"].max())
+        else:
+            # Fall back to simulator-reported means when packet filtering is empty.
+            ave_total = pd.to_numeric(steady_row.get("ex_time_total"), errors="coerce")
+            ave_wait = pd.to_numeric(steady_row.get("ex_time_wait"), errors="coerce")
+            ave_service = pd.to_numeric(steady_row.get("ex_time_service"), errors="coerce")
+            window_start, window_end = steady_start, steady_end
+            num_extracted = int(pd.to_numeric(steady_row.get("num_reqs"), errors="coerce") or 0)
+
+        window_metrics = compute_window_cost_power_metrics(
+            analysis_df=analysis_df,
+            window_start=steady_start,
+            window_end=steady_end,
+            num_reqs=num_extracted,
+            num_instance_df=num_instance_df,
+        )
+        if pd.isna(window_metrics.get("window_ave_instances")) and steady_row is not None:
+            window_metrics["window_ave_instances"] = pd.to_numeric(
+                steady_row.get("ave_instances_steady"), errors="coerce"
+            )
+
+        steady_fields = {
+            "num_reqs": num_extracted,
+            "ave_total": ave_total,
+            "ave_wait": ave_wait,
+            "ave_service": ave_service,
+            "window_start": window_start,
+            "window_end": window_end,
+            "elapsed_time": window_metrics["window_elapsed_time"],
+            "total_cost": window_metrics["window_total_cost"],
+            "total_energy_wh": window_metrics["window_total_energy_wh"],
+            "cost_per_time": window_metrics["window_cost_per_time"],
+            "energy_per_time_wh_per_sec": window_metrics["window_energy_per_time_wh_per_sec"],
+            "average_power_w": window_metrics["window_average_power_w"],
+            "cost_per_request": window_metrics["window_cost_per_request"],
+            "energy_per_request_wh": window_metrics["window_energy_per_request_wh"],
+            "avg_cpu_utilization": window_metrics["window_avg_cpu_utilization"],
+            "ave_instances": window_metrics["window_ave_instances"],
+        }
+        for key, value in steady_fields.items():
+            calculated_stats[key] = value
+            # Compatibility alias for older graph scripts that expect *_50.
+            calculated_stats[f"{key}_50"] = value
+
+        print(f"--- {filepath} の処理終了 (steady window [{steady_start}, {steady_end}]) ---")
+        return calculated_stats
+
+    # Legacy path: trailing-percentage windows (deprecated when steady result exists).
+    calculated_stats["steady_mode"] = False
+    sorted_for_extract = df_step1_filtered.sort_values(by="end", ascending=False)
 
     for p_decimal in PERCENTAGE_DECIMALS:
         p_suffix = str(int(p_decimal * 100))
@@ -457,9 +556,14 @@ def aggregate_rows_by_config(rows, step_per_time):
             "instance_type": instance_type,
             "step_per_time": spt,
             "num_files_averaged": len(members),
+            "steady_mode": any(bool(m.get("steady_mode")) for m in members),
         }
 
         for prefix in metric_prefixes:
+            # Unsuffixed steady columns.
+            if any(prefix in m for m in members):
+                values = pd.to_numeric([m.get(prefix, np.nan) for m in members], errors="coerce")
+                agg[prefix] = float(np.nanmean(values)) if not np.all(np.isnan(values)) else np.nan
             for sfx in PERCENTAGE_SUFFIXES:
                 col = f"{prefix}_{sfx}"
                 values = pd.to_numeric([m.get(col, np.nan) for m in members], errors="coerce")
@@ -519,7 +623,23 @@ def main():
             "CPU": parsed_name_info["CPU"],
             "instance_type": instance_type,
             "step_per_time": step_per_time,
+            "steady_mode": bool(processing_results.get("steady_mode", False)),
         }
+
+        # Preferred unsuffixed steady metrics (when present).
+        for prefix in [
+            "num_reqs", "ave_total", "ave_wait", "ave_service",
+            "window_start", "window_end", "elapsed_time",
+            "total_cost", "total_energy_wh",
+            "cost_per_time", "energy_per_time_wh_per_sec", "average_power_w",
+            "cost_per_request", "energy_per_request_wh", "ave_instances",
+        ]:
+            if prefix in processing_results:
+                val = processing_results.get(prefix, np.nan)
+                if prefix.startswith("ave_"):
+                    row[prefix] = round_to_significant_figures(val, 4)
+                else:
+                    row[prefix] = val
 
         for p_sfx in PERCENTAGE_SUFFIXES:
             row[f"num_reqs_{p_sfx}"] = processing_results.get(f"num_reqs_{p_sfx}", np.nan)
@@ -555,7 +675,8 @@ def main():
 
     # 列順を整理
     base_columns = [
-        "datetime", "lambda", "mu", "servers", "CPU", "instance_type", "step_per_time", "num_files_averaged"
+        "datetime", "lambda", "mu", "servers", "CPU", "instance_type",
+        "step_per_time", "num_files_averaged", "steady_mode",
     ]
 
     ordered_metric_columns = []
@@ -566,6 +687,7 @@ def main():
         "cost_per_time", "energy_per_time_wh_per_sec", "average_power_w",
         "cost_per_request", "energy_per_request_wh", "ave_instances",
     ]:
+        ordered_metric_columns.append(prefix)
         for sfx in PERCENTAGE_SUFFIXES:
             ordered_metric_columns.append(f"{prefix}_{sfx}")
 

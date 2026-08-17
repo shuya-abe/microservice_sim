@@ -24,7 +24,9 @@ class Scaler:
     def runStep4Container(self, timestep):
         if not self.isTime2Check(timestep):
             return
-        
+        if not self.containerScaleCheckNeeded():
+            return
+
         metrics = self.getMetrics()
         # print(str(timestep) + ", METRICS: " + str(metrics))
         if metrics - 1 > self.config.CONFIG_SCALE_SENSITIVE:
@@ -170,4 +172,42 @@ class Scaler:
     
     def isTime2Check(self, timestep):
         return timestep != 0 and (timestep % (self.config.CONFIG_SCALE_INTERVAL * self.config.SIM_STEP_PER_TIME)) == 0
+
+    def containerScaleCheckNeeded(self):
+        """
+        True if the next periodic container scale sample could change state.
+
+        When a single ACTIVE instance has been idle since the last sample (CpuCtr=0,
+        no queued work), metrics would be ~0 and scaleIn/Out would not fire — the
+        periodic check can be skipped until load or instance transitions resume.
+        """
+        if self.mode != Flg.FLG_CONTAINER:
+            return True
+
+        balancer = self.getBalancer()
+        if balancer.getRequests():
+            return True
+
+        active_or_working = 0
+        for instance in self.getRunnableInstances():
+            status = instance.getStatus()
+            if status in (Status.SETUP, Status.SHUTDOWN):
+                return True
+            if status not in (Status.ACTIVE, Status.WORKING):
+                continue
+            active_or_working += 1
+            if instance.getCpuCtr() > 0:
+                return True
+            if instance.getQueueLength() > 0:
+                return True
+            for req in instance.exec_queue:
+                if req is not None and req.workload > 0:
+                    return True
+
+        if active_or_working == 0:
+            return True
+        if active_or_working > 1:
+            # Idle but over-provisioned: one check may scale in.
+            return True
+        return False
     

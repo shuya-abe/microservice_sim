@@ -20,8 +20,8 @@ pip install pandas matplotlib numpy
 |---|---|
 | `log_analyzer_with_cost_and_power.py` | 時系列解析（インスタンス/リクエスト/CPU/コスト/電力） |
 | `analyze_status_with_cost.py` | インスタンス単位の稼働状態 + コスト CSV |
-| `enhanced_process_result.py` | 複数 `*_packet.csv` を集約し応答時間・コスト・電力を要約 |
-| `generate_graphs.py` | 集約 CSV から比較グラフ（PDF）を生成 |
+| `enhanced_process_result.py` | 複数 `*_packet.csv` を集約。companion の `*_result.csv` に定常窓があればそれを使用（無ければ従来の末尾％抽出） |
+| `generate_graphs.py` | 集約 CSV から比較グラフ（PDF）を生成。`ave_total` 等を優先し、無ければ `*_50` にフォールバック |
 
 ---
 

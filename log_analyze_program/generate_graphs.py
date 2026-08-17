@@ -268,6 +268,14 @@ def _endpoint_legend_handles():
         ),
     ]
 
+def _resolve_metric_col(df, preferred, fallback):
+    if preferred in df.columns:
+        return preferred
+    if fallback in df.columns:
+        return fallback
+    return preferred
+
+
 def plot_graphs(csv_filepath):
     """
     Generates graphs from a processed CSV file with specified styling,
@@ -285,12 +293,26 @@ def plot_graphs(csv_filepath):
         print(f"Error reading CSV file: {e}")
         return
 
+    # Prefer unsuffixed steady columns; fall back to legacy *_50.
+    col_total = _resolve_metric_col(df, "ave_total", "ave_total_50")
+    col_wait = _resolve_metric_col(df, "ave_wait", "ave_wait_50")
+    col_service = _resolve_metric_col(df, "ave_service", "ave_service_50")
+    col_instances = _resolve_metric_col(df, "ave_instances", "ave_instances_50")
+    col_cost_time = _resolve_metric_col(df, "cost_per_time", "cost_per_time_50")
+    col_energy_time = _resolve_metric_col(
+        df, "energy_per_time_wh_per_sec", "energy_per_time_wh_per_sec_50"
+    )
+    col_cost_req = _resolve_metric_col(df, "cost_per_request", "cost_per_request_50")
+    col_energy_req = _resolve_metric_col(df, "energy_per_request_wh", "energy_per_request_wh_50")
+    col_total_cost = _resolve_metric_col(df, "total_cost", "total_cost_50")
+    col_total_energy = _resolve_metric_col(df, "total_energy_wh", "total_energy_wh_50")
+
     # 2. Validate required columns
     required_cols = [
         'mu', 'CPU', 'instance_type', 'lambda',
-        'ave_total_50', 'ave_wait_50', 'ave_service_50',
-        'cost_per_time_50', 'energy_per_time_wh_per_sec_50',
-        'cost_per_request_50', 'energy_per_request_wh_50',
+        col_total, col_wait, col_service,
+        col_cost_time, col_energy_time,
+        col_cost_req, col_energy_req,
     ]
     missing_cols = [col for col in required_cols if col not in df.columns]
     if missing_cols:
@@ -299,11 +321,11 @@ def plot_graphs(csv_filepath):
 
     numeric_plot_cols = [
         'mu', 'CPU', 'lambda',
-        'ave_total_50', 'ave_wait_50', 'ave_service_50',
-        'cost_per_time_50', 'energy_per_time_wh_per_sec_50',
-        'cost_per_request_50', 'energy_per_request_wh_50',
-        'total_cost_50', 'total_energy_wh_50',
-        'ave_instances_50',
+        col_total, col_wait, col_service,
+        col_cost_time, col_energy_time,
+        col_cost_req, col_energy_req,
+        col_total_cost, col_total_energy,
+        col_instances,
     ]
     for col in numeric_plot_cols:
         if col in df.columns:
@@ -320,27 +342,27 @@ def plot_graphs(csv_filepath):
 
     # 4. Plot config: split by mu and metric, X axis is always lambda.
     plot_types_config = {
-        'total': {'col': 'ave_total_50', 'label': 'ave. of Total time [s]'},
-        'wait': {'col': 'ave_wait_50', 'label': 'ave. of Wait time [s]'},
-        'service': {'col': 'ave_service_50', 'label': 'ave. of Service time [s]'},
+        'total': {'col': col_total, 'label': 'ave. of Total time [s]'},
+        'wait': {'col': col_wait, 'label': 'ave. of Wait time [s]'},
+        'service': {'col': col_service, 'label': 'ave. of Service time [s]'},
         'instances': {
-            'col': 'ave_instances_50',
+            'col': col_instances,
             'label': 'ave. of Hot Instances',
         },
         'cost_per_time': {
-            'col': 'cost_per_time_50',
+            'col': col_cost_time,
             'label': 'Cost per Time [USD/s]',
         },
         'energy_per_time': {
-            'col': 'energy_per_time_wh_per_sec_50',
+            'col': col_energy_time,
             'label': 'Energy per Time [Wh/s]',
         },
         'cost_per_request': {
-            'col': 'cost_per_request_50',
+            'col': col_cost_req,
             'label': 'Cost per Request [USD/req]',
         },
         'energy_per_request': {
-            'col': 'energy_per_request_wh_50',
+            'col': col_energy_req,
             'label': 'Energy per Request [Wh/req]',
         },
     }
@@ -525,20 +547,24 @@ def plot_graphs(csv_filepath):
 
             plt.close()
 
-        # 7. Trade-off plots (X: ave_total_50, Y: cost or energy)
-        if TRADEOFF_USE_TOTAL_METRICS and 'total_cost_50' in df_mu_filtered.columns and 'total_energy_wh_50' in df_mu_filtered.columns:
+        # 7. Trade-off plots (X: response time, Y: cost or energy)
+        if (
+            TRADEOFF_USE_TOTAL_METRICS
+            and col_total_cost in df_mu_filtered.columns
+            and col_total_energy in df_mu_filtered.columns
+        ):
             tradeoff_configs = [
                 {
                     'key': 'tradeoff_total_cost_vs_total_time',
-                    'x_col': 'ave_total_50',
-                    'y_col': 'total_cost_50',
+                    'x_col': col_total,
+                    'y_col': col_total_cost,
                     'x_label': 'ave. of Total time [s]',
                     'y_label': 'Total Cost [USD]',
                 },
                 {
                     'key': 'tradeoff_total_energy_vs_total_time',
-                    'x_col': 'ave_total_50',
-                    'y_col': 'total_energy_wh_50',
+                    'x_col': col_total,
+                    'y_col': col_total_energy,
                     'x_label': 'ave. of Total time [s]',
                     'y_label': 'Total Energy [Wh]',
                 },
@@ -546,21 +572,21 @@ def plot_graphs(csv_filepath):
         else:
             if TRADEOFF_USE_TOTAL_METRICS:
                 print(
-                    "Total trade-off columns not found (total_cost_50 / total_energy_wh_50). "
+                    "Total trade-off columns not found. "
                     "Falling back to per-request metrics."
                 )
             tradeoff_configs = [
                 {
                     'key': 'tradeoff_cost_vs_total',
-                    'x_col': 'ave_total_50',
-                    'y_col': 'cost_per_request_50',
+                    'x_col': col_total,
+                    'y_col': col_cost_req,
                     'x_label': 'ave. of Total time [s]',
                     'y_label': 'Cost per Request [USD/req]',
                 },
                 {
                     'key': 'tradeoff_energy_vs_total',
-                    'x_col': 'ave_total_50',
-                    'y_col': 'energy_per_request_wh_50',
+                    'x_col': col_total,
+                    'y_col': col_energy_req,
                     'x_label': 'ave. of Total time [s]',
                     'y_label': 'Energy per Request [Wh/req]',
                 },
@@ -570,15 +596,15 @@ def plot_graphs(csv_filepath):
             tradeoff_configs.extend([
                 {
                     'key': 'tradeoff_cost_per_time_vs_total_time',
-                    'x_col': 'ave_total_50',
-                    'y_col': 'cost_per_time_50',
+                    'x_col': col_total,
+                    'y_col': col_cost_time,
                     'x_label': 'ave. of Total time [s]',
                     'y_label': 'Cost per Time [USD/s]',
                 },
                 {
                     'key': 'tradeoff_energy_per_time_vs_total_time',
-                    'x_col': 'ave_total_50',
-                    'y_col': 'energy_per_time_wh_per_sec_50',
+                    'x_col': col_total,
+                    'y_col': col_energy_time,
                     'x_label': 'ave. of Total time [s]',
                     'y_label': 'Energy per Time [Wh/s]',
                 },

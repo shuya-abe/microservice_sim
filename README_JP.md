@@ -95,10 +95,28 @@ python simulate.py
 | `sim_count_start` / `sim_count_end` | 繰り返し添字 `[start, end)` | `0`〜`10`（10 回） |
 | `autotune_enabled` | ワーカー数の自動選定 | `True` |
 | `autotune_only` | オートチューンのみで本実験をスキップ | `False` |
+| `autotune_profile_sim_time` | プロファイル1本の論理時間目安（完了数 `≈ λ×t` に換算） | `30` |
+| `autotune_profile_max_lambda` | プロファイルに使う λ の上限（1600 等は除外） | `200` |
+| `autotune_profile_max_requests` | プロファイル1本の最大完了数 | `5000` |
+| `generate_requests_only` | 共有リクエスト CSV の事前生成だけ行い本実験をスキップ（並列） | `False` |
+
+CLI: `python simulate.py --generate-requests-only` でも同じ動作になります（SETTINGS の値にかかわらず生成のみ）。
 | `max_workers` | 固定ワーカー数（`None` なら既定ポリシー） | `None` |
 | `reserved_cores` | ホスト用に残すコア数 | `4` |
 | `host_cores` | WSL 時のホストコア上限ヒント | `20` |
 | `enable_hybrid_skip` | アイドル区間のステップ飛ばし | `True` |
+| `enable_scale_check_skip` | コンテナの periodic scale チェックが no-op なら次到着まで飛ばす | `True` |
+| `steady_enabled` | シミュレータ内定常判定まで継続 | `True` |
+| `steady_batch_reqs` | 1 バッチあたり最低完了リクエスト数 | `10000` |
+| `steady_batch_min_time` | 1 バッチ最低論理時間（`None` なら serverless=timer / container=4×scale_interval） | `None` |
+| `steady_rel_tol` | 連続バッチ平均の相対許容差 | `0.05` |
+| `steady_consecutive` | 定常とみなす連続安定バッチ数 | `3` |
+| `steady_max_batches` | バッチ数の上限（安全弁） | `50` |
+| `steady_ci_level` | バッチ平均の信頼水準 | `0.95` |
+| `steady_preextend_enabled` | 定常に必要な到着長の目安まで共有 CSV を事前延長 | `True` |
+| `steady_preextend_batches` | 事前延長のバッチ数目安（`None` なら `max(3K, K+10)`） | `None` |
+| `steady_preextend_margin` | 目安時間への安全係数 | `1.1` |
+| `steady_preextend_max_rows` | ファイルあたり事前生成行数の上限（超過分はオンライン追記） | `2000000` |
 
 ### 並列実行の流れ
 
@@ -131,9 +149,40 @@ python simulate.py
 
 | `limit` 値 | 定数 | 終了条件 |
 |---|---|---|
-| `req` | `LIMIT_REQUEST` | 完了リクエスト数が `threshold` に達するまで |
+| `req` | `LIMIT_REQUEST` | 完了リクエスト数が `threshold` に達するまで（定常モード OFF 時） |
 | `step` | `LIMIT_TIMESTEP` | ステップが `threshold` 以上 **かつ** Sender の全リクエストを投入・処理し終えるまで |
 | `time` | `LIMIT_TIME` | 論理時間が `threshold` 以上 **かつ** 全リクエスト処理完了まで |
+
+### 定常モード（`steady_enabled=True`）
+
+`simulate.py` の `SETTINGS` で有効化します。高 λ でも serverless のアイドルタイマ（例: 600）分の過渡をまたいで計測するため、**固定 threshold では止めず**、バッチ計測で定常化するまで走らせます。
+
+到着列は比較のため **オフライン CSV が正** です。同一 `(threshold, λ, μ, sim_index)` の構成（container / serverless など）は同じファイルを読みます。起動時に定常到達の目安時間
+
+`horizon ≈ steady_preextend_batches × max(batch_min_time, batch_reqs/λ) × margin`
+
+（行数は `steady_preextend_max_rows` で上限）まで事前延長し、それでも足りない場合だけロック付きで追加生成して **同じ CSV に追記** します。後から走った構成や並列ワーカーは追記分を再利用するので、システム差だけを比較できます。本実験の投入順は `config_list.csv` の行順です。定常バッチ完了は親プロセスが `[steady] repeat=...` として表示します。
+
+**バッチ定義（ハイブリッド）**
+
+1 バッチは次の **両方** を満たすまで継続します。
+
+- 完了リクエスト数 ≥ `steady_batch_reqs`
+- バッチ壁時計（論理時間）≥ `steady_batch_min_time`  
+  - 未指定時: serverless / warm-wait → `serverless_timer`、container → `4 * scale_interval`
+
+**安定判定**
+
+各バッチで系内時間・待機時間・時間加重平均ホット台数の平均と（応答時間系は）95% CI を計算します。連続 `steady_consecutive` バッチについて、各指標で
+
+- 相対差 ≤ `steady_rel_tol`、または
+- 95% CI が交差（台数は相対差のみ）
+
+なら定常到達とします。採用値は **その連続 K バッチを結合した平均** です。`steady_max_batches` に達した場合は `steady_reached=false` で末尾 K バッチを採用して終了します。
+
+**出力の意味**
+
+`ex_time_*` / `ave_instances_steady` は全期間平均ではなく **定常区間の値** です。`steady_start` / `steady_end` がその区間です。事後の「末尾 50%…」推定は不要で、`log_analyze_program/enhanced_process_result.py` は companion の `*_result.csv` に定常窓があればそれを使います（無い旧結果のみ従来の％抽出）。
 
 ---
 
@@ -160,7 +209,7 @@ Sender.runStep
 **次イベント候補の例**
 
 - 次リクエスト到着ステップ  
-- コンテナの次スケールチェック時刻（`SCALE_INTERVAL * STEP_PER_TIME` の倍数）  
+- コンテナの次スケールチェック時刻（`SCALE_INTERVAL * STEP_PER_TIME` の倍数。**ただし** `enable_scale_check_skip=True` かつ単一 ACTIVE が完全アイドルなら候補から除外）  
 - SETUP / SHUTDOWN 完了時刻  
 - サーバレスのアイドルタイムアウト  
 - 実行中リクエストの処理完了見積もり  
@@ -299,9 +348,10 @@ CSV 行から全パラメータを構築し、入出力パスを決定します�
 ### `generator.py`
 
 - `createAllRequests`: 終了条件に達するまで到着・ワークロードをサンプリング  
+- `extendUntil` / `ensure_file_until`: 共有 CSV を先読みし、不足分だけ生成して追記（並列時は CSV 本体に `flock`。sidecar の `.lock` は作らない）
 - `calculateNextRequest`: 到着間隔 `floor(Exp(1/λ) * step_per_time) / step_per_time`  
 - `calculateWorkload4Request`: `capacity * Exp(1/μ)`  
-- `outputRequests` / `inputRequests`: CSV 書き出し・読込  
+- `outputRequests` / `inputRequests` / `appendRequests`: CSV 書き出し・読込・追記  
 
 ### `sender.py`
 
@@ -382,7 +432,7 @@ CSV 行から全パラメータを構築し、入出力パスを決定します�
 ファイル名例: `100000reqs_lambda100.0_mu100.0_0.csv`  
 （`{threshold}{reqs|step|sec}_lambda{λ}_mu{μ}_{sim_index}.csv`）
 
-同一 `(threshold, λ, μ, sim_index)` ならコンテナ実験とサーバレス実験で同じリクエスト列を共有できます。
+同一 `(threshold, λ, μ, sim_index)` ならコンテナ実験とサーバレス実験で同じリクエスト列を共有できます。定常モードで列が足りなくなればそのファイルへ追記し、他構成も追記後の列を使います。比較の前提は「到着過程を揃えてシステム側だけ変える」ことです。
 
 ---
 
@@ -400,10 +450,14 @@ CSV 行から全パラメータを構築し、入出力パスを決定します�
 | `step_per_time` | ステップ粒度 |
 | `total_time` | 終了時の論理時間（`num_steps / step_per_time`） |
 | `num_steps` | 総ステップ数 |
-| `num_reqs` | 完了リクエスト数 |
-| `ex_time_service` | 平均サービス時間 |
-| `ex_time_wait` | 平均待ち時間 |
-| `ex_time_total` | 平均滞在時間（lifetime） |
+| `num_reqs` | 定常モード時は採用定常区間の完了数、それ以外は全完了数 |
+| `ex_time_service` / `ex_time_wait` / `ex_time_total` | 平均サービス / 待ち / 滞在（定常モード時は定常区間） |
+| `steady_enabled` | 定常モードの有無 |
+| `steady_reached` | 連続安定バッチ条件を満たしたか |
+| `num_batches` / `steady_batch_index` | 実施バッチ数 |
+| `steady_start` / `steady_end` | 採用定常区間の論理時刻 |
+| `ci_*_low` / `ci_*_high` | 定常区間の応答時間系 95% CI |
+| `ave_instances_steady` | 定常区間の時間加重平均ホット台数 |
 
 既に非空ファイルがあるタスクはランナーがスキップします。
 
@@ -413,7 +467,8 @@ CSV 行から全パラメータを構築し、入出力パスを決定します�
 **書き出しタイミング**:
 
 1. **初期化時**（`settingSimulate`）: ヘッダだけ空ファイルとして作成  
-2. **終了時**（`calcTotalTimeVerbose`）: ヘッダ付きで **全完了リクエストを再書き込み**（実質ここが本データ）
+2. **定常モード**: 完了のたびに追記（メモリ節約のためリクエストオブジェクトは保持しない）  
+3. **非定常モード・終了時**（`calcTotalTimeVerbose`）: ヘッダ付きで **全完了リクエストを再書き込み**
 
 | 列 | 内容 |
 |---|---|
@@ -529,6 +584,7 @@ CSV 行から全パラメータを構築し、入出力パスを決定します�
 |---|---|
 | `simulate.py` | エントリポイント・並列実行・オートチューン |
 | `queue_simulator.py` | シミュレーションエンジン |
+| `steady_state.py` | 定常判定（バッチ平均・CI・連続安定） |
 | `config.py` | 設定パースとパス生成 |
 | `generator.py` | リクエスト生成・CSV I/O |
 | `sender.py` | 時刻駆動のリクエスト投入 |

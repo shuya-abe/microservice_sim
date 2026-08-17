@@ -1,11 +1,16 @@
 from queue_simulator import QueueSimulator
 from config import Config
 from generator import Generator
+from limit import Limit
 import csv
 import time
 import os
 import tempfile
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import argparse
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
+from queue import Empty
+from worker_progress import init_progress_queue
 
 
 SUMMARY_HEADER = [
@@ -23,6 +28,43 @@ SUMMARY_HEADER = [
     "ex_time_service",
     "ex_time_wait",
     "ex_time_total",
+    "steady_enabled",
+    "steady_reached",
+    "num_batches",
+    "steady_batch_index",
+    "steady_start",
+    "steady_end",
+    "ci_total_low",
+    "ci_total_high",
+    "ci_wait_low",
+    "ci_wait_high",
+    "ci_service_low",
+    "ci_service_high",
+    "ave_instances_steady",
+]
+
+
+RESULT_HEADER = [
+    "step_per_time",
+    "total_time",
+    "num_steps",
+    "num_reqs",
+    "ex_time_service",
+    "ex_time_wait",
+    "ex_time_total",
+    "steady_enabled",
+    "steady_reached",
+    "num_batches",
+    "steady_batch_index",
+    "steady_start",
+    "steady_end",
+    "ci_total_low",
+    "ci_total_high",
+    "ci_wait_low",
+    "ci_wait_high",
+    "ci_service_low",
+    "ci_service_high",
+    "ave_instances_steady",
 ]
 
 
@@ -33,7 +75,7 @@ SETTINGS = {
     # Repeat index start (inclusive).
     "sim_count_start": 0,
     # Repeat index end (exclusive).
-    "sim_count_end": 10,
+    "sim_count_end": 1,
     # Enable worker auto-tuning with a small benchmark run.
     "autotune_enabled": True,
     # If True, run only auto-tuning and skip the main experiment.
@@ -43,15 +85,44 @@ SETTINGS = {
     # Cores to keep free for host/background tasks.
     "reserved_cores": 4,
     # Host CPU core hint used when running on WSL.
-    "host_cores": 20,
+    "host_cores": 12,
     # Number of config rows sampled for auto-tuning benchmark.
     "autotune_configs": 4,
     # Number of repeat rounds sampled for auto-tuning benchmark.
     "autotune_rounds": 2,
     # Candidate worker counts tested by auto-tuning.
     "autotune_candidates": list(range(5, 15)),
-    # Enable/disable hybrid event-driven skip logic.
-    "enable_hybrid_skip": True,
+    # Logical sim-time cap for each autotune profile task (keeps tiny-λ profiles from running forever).
+    "autotune_profile_sim_time": 30.0,
+    # Do not sample λ above this in autotune profile (λ=1600 profiles are too slow for worker pick).
+    "autotune_profile_max_lambda": 200.0,
+    # Cap completed requests per autotune profile run.
+    "autotune_profile_max_requests": 5000,
+    # If True, only pre-generate shared request CSVs (parallel) and skip simulation.
+    "generate_requests_only": False,
+    # --- Steady-state detection (online batches) ---
+    # When True, run until consecutive batches stabilize (or max_batches).
+    "steady_enabled": True,
+    # Minimum completed requests per measurement batch.
+    "steady_batch_reqs": 1000,
+    # Minimum simulated time per batch. None => serverless timer / container heuristic.
+    "steady_batch_min_time": 600,
+    # Relative tolerance between consecutive batch means.
+    "steady_rel_tol": 0.10,
+    # Number of consecutive stable batches required.
+    "steady_consecutive": 2,
+    # Safety cap on number of batches.
+    "steady_max_batches": 100000,
+    # Confidence level for batch means (normal approx).
+    "steady_ci_level": 0.95,
+    # Pre-extend shared request CSVs toward an estimated steady horizon (online extend still fills gaps).
+    "steady_preextend_enabled": True,
+    # Batches worth of arrivals to pre-generate. None => max(3*consecutive, consecutive+10).
+    "steady_preextend_batches": None,
+    # Multiply estimated horizon by this safety margin.
+    "steady_preextend_margin": 1.1,
+    # Cap pre-generated rows per request file (remaining arrivals still grow online).
+    "steady_preextend_max_rows": 2000000,
 }
 
 
@@ -119,13 +190,13 @@ def parse_candidate_workers(cpu_budget, configured_candidates=None):
     return cleaned
 
 
-def build_task_specs(config_rows, sim_count_start, sim_count_end, config_limit=None, round_limit=None):
-    if config_limit is None:
-        selected_rows = config_rows
-    try:
-        selected_rows = config_rows[:config_limit]
-    except TypeError:
-        selected_rows = config_rows
+def build_task_specs(config_rows, sim_count_start, sim_count_end, config_limit=None, round_limit=None, row_indices=None):
+    if row_indices is not None:
+        selected = [(int(i), config_rows[int(i)]) for i in row_indices]
+    elif config_limit is None:
+        selected = list(enumerate(config_rows))
+    else:
+        selected = list(enumerate(config_rows[:config_limit]))
 
     total_rounds = sim_count_end - sim_count_start
     if round_limit is None:
@@ -136,39 +207,251 @@ def build_task_specs(config_rows, sim_count_start, sim_count_end, config_limit=N
     task_specs = []
     for offset in range(effective_rounds):
         sim_index = sim_count_start + offset
-        for config_idx, row in enumerate(selected_rows):
+        for config_idx, row in selected:
             task_specs.append((sim_index, config_idx, row))
     return task_specs
+
+
+def select_autotune_profile_indices(config_rows, count):
+    """Spread profile samples across λ (capped) so autotune stays fast on any CSV order."""
+    n = len(config_rows)
+    count = min(int(count), n)
+    if count <= 0:
+        return []
+    if count >= n:
+        return list(range(n))
+
+    max_lam = float(SETTINGS.get("autotune_profile_max_lambda", 200.0) or 200.0)
+    first_at_lambda = {}
+    for i, row in enumerate(config_rows):
+        try:
+            lam = float(row[5])
+        except (IndexError, TypeError, ValueError):
+            lam = 0.0
+        first_at_lambda.setdefault(lam, i)
+
+    unique_lams = sorted(first_at_lambda)
+    eligible_lams = [lam for lam in unique_lams if lam <= max_lam]
+    if not eligible_lams:
+        eligible_lams = unique_lams[:1]
+
+    picked = []
+    used = set()
+    span = max(count - 1, 1)
+    for j in range(count):
+        pos = int(round(j * (len(eligible_lams) - 1) / span))
+        idx = first_at_lambda[eligible_lams[pos]]
+        if idx not in used:
+            picked.append(idx)
+            used.add(idx)
+
+    if len(picked) < count:
+        for lam in eligible_lams:
+            idx = first_at_lambda[lam]
+            if idx not in used:
+                picked.append(idx)
+                used.add(idx)
+            if len(picked) >= count:
+                break
+    return picked
+
+
+def estimate_profile_request_threshold(config, profile_sim_time):
+    """Request-count cap for a short autotune profile (LIMIT_REQUEST stops exactly here)."""
+    lam = max(float(config.CONFIG_LAMBDA), 1e-12)
+    t = max(float(profile_sim_time), 1.0)
+    max_reqs = clamp_int(SETTINGS.get("autotune_profile_max_requests"), 5000, min_value=100)
+    estimated = int(lam * t * 1.25) + 64
+    return min(max(estimated, 100), max_reqs)
+
+
+def apply_steady_settings(config: Config):
+    """Attach steady-state detection parameters from SETTINGS onto config."""
+    from steady_state import resolve_batch_min_time
+
+    if getattr(config, "STEADY_FORCE_DISABLED", False):
+        config.STEADY_ENABLED = False
+    else:
+        config.STEADY_ENABLED = bool(SETTINGS.get("steady_enabled", False))
+    config.STEADY_BATCH_REQS = clamp_int(SETTINGS.get("steady_batch_reqs"), 10000, min_value=1)
+    config.STEADY_BATCH_MIN_TIME = SETTINGS.get("steady_batch_min_time")
+    config.STEADY_REL_TOL = float(SETTINGS.get("steady_rel_tol", 0.05))
+    config.STEADY_CONSECUTIVE = clamp_int(SETTINGS.get("steady_consecutive"), 3, min_value=2)
+    config.STEADY_MAX_BATCHES = clamp_int(SETTINGS.get("steady_max_batches"), 50, min_value=1)
+    config.STEADY_CI_LEVEL = float(SETTINGS.get("steady_ci_level", 0.95))
+    # Resolve default min time now that instance mode is known.
+    if config.STEADY_BATCH_MIN_TIME is None:
+        config.STEADY_BATCH_MIN_TIME = resolve_batch_min_time(config)
+    else:
+        config.STEADY_BATCH_MIN_TIME = float(config.STEADY_BATCH_MIN_TIME)
+    return config
 
 
 def setup_config(row, sim_index):
     config = Config()
     config.initialSetup(row, sim_index)
+    apply_steady_settings(config)
     return config
+
+
+def estimate_steady_batch_time(config):
+    """Expected sim-time length of one steady measurement batch."""
+    lam = max(float(config.CONFIG_LAMBDA), 1e-12)
+    t_min = float(getattr(config, "STEADY_BATCH_MIN_TIME", 0.0) or 0.0)
+    n_min = int(getattr(config, "STEADY_BATCH_REQS", 1) or 1)
+    return max(t_min, n_min / lam)
+
+
+def resolve_preextend_batches(config):
+    configured = SETTINGS.get("steady_preextend_batches")
+    consecutive = int(getattr(config, "STEADY_CONSECUTIVE", 3) or 3)
+    max_batches = int(getattr(config, "STEADY_MAX_BATCHES", consecutive) or consecutive)
+    if configured is None:
+        batches = max(consecutive * 3, consecutive + 10)
+    else:
+        batches = clamp_int(configured, consecutive * 3, min_value=consecutive)
+    return min(batches, max_batches)
+
+
+def estimate_steady_preextend_horizon(config):
+    """
+    Approximate logical time the shared arrival CSV should cover up front.
+
+    Exact end time is unknown (depends on when consecutive batches stabilize),
+    so we use:
+      horizon ~= preextend_batches * max(batch_min_time, batch_reqs/lambda) * margin
+    capped so that expected rows ~= lambda * horizon <= steady_preextend_max_rows.
+    Online extendUntil still fills anything beyond this.
+    """
+    if not bool(getattr(config, "STEADY_ENABLED", False)):
+        return None
+    batches = resolve_preextend_batches(config)
+    margin = float(SETTINGS.get("steady_preextend_margin", 1.1) or 1.1)
+    horizon = estimate_steady_batch_time(config) * batches * max(margin, 1.0)
+    lam = max(float(config.CONFIG_LAMBDA), 1e-12)
+    max_rows = clamp_int(SETTINGS.get("steady_preextend_max_rows"), 2000000, min_value=1000)
+    # Leave headroom vs Poisson overshoot.
+    horizon_cap = float(max_rows) / lam
+    return min(horizon, horizon_cap)
 
 
 def ensure_request_file_exists(config):
     req_file = config.CONFIG_REQUEST_FILE
-    if os.path.isfile(req_file):
-        return
+    if os.path.isfile(req_file) and os.path.getsize(req_file) > 0:
+        return False
 
+    directory = os.path.dirname(req_file) or "."
+    os.makedirs(directory, exist_ok=True)
     step_per_time = config.SIM_STEP_PER_TIME
     _lambda = decimal_normalize(config.CONFIG_LAMBDA)
     mu = decimal_normalize(config.CONFIG_MU)
     generator = Generator(step_per_time, _lambda, mu, config)
-    generator.createAllRequests(config.SIM_LIMIT, config.SIM_THRESHOLD)
-    generator.outputRequests(req_file)
+    generator.generate_and_write(req_file, config.SIM_LIMIT, config.SIM_THRESHOLD)
+    return True
 
 
-def precreate_request_files(task_specs):
-    prepared_files = set()
+def ensure_request_file_preextended(config, preextend=True):
+    """Create seed CSV if needed, then optionally extend toward estimated steady horizon."""
+    created = ensure_request_file_exists(config)
+    appended = 0
+    horizon = None
+    if preextend and bool(SETTINGS.get("steady_preextend_enabled", True)):
+        horizon = estimate_steady_preextend_horizon(config)
+        if horizon is not None:
+            step_per_time = config.SIM_STEP_PER_TIME
+            _lambda = decimal_normalize(config.CONFIG_LAMBDA)
+            mu = decimal_normalize(config.CONFIG_MU)
+            generator = Generator(step_per_time, _lambda, mu, config)
+            max_rows = clamp_int(SETTINGS.get("steady_preextend_max_rows"), 2000000, min_value=1000)
+            appended = generator.ensure_file_until(config.CONFIG_REQUEST_FILE, horizon, max_new=max_rows)
+    return config.CONFIG_REQUEST_FILE, created, int(appended or 0), horizon
+
+
+def _generate_request_file_task(payload):
+    sim_index, row, preextend = payload
+    config = setup_config(row, sim_index)
+    path, created, appended, horizon = ensure_request_file_preextended(config, preextend=preextend)
+    return path, created, appended, horizon
+
+
+def collect_unique_request_jobs(task_specs):
+    jobs = []
+    seen = set()
     for sim_index, _config_idx, row in task_specs:
         config = setup_config(row, sim_index)
         req_file = config.CONFIG_REQUEST_FILE
-        if req_file in prepared_files:
+        if req_file in seen:
             continue
-        ensure_request_file_exists(config)
-        prepared_files.add(req_file)
+        seen.add(req_file)
+        jobs.append((sim_index, row))
+    return jobs
+
+
+def cleanup_stale_request_lock_files(show_progress=True):
+    """Remove legacy sidecar *.csv.lock files from older generator versions."""
+    requests_dir = os.path.join(".", "requests")
+    if not os.path.isdir(requests_dir):
+        return 0
+    removed = 0
+    for name in os.listdir(requests_dir):
+        if not name.endswith(".lock"):
+            continue
+        path = os.path.join(requests_dir, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            os.remove(path)
+            removed += 1
+        except OSError:
+            pass
+    if show_progress and removed:
+        print(f"removed stale request lock files: {removed}")
+    return removed
+
+
+def precreate_request_files(task_specs, max_workers=1, show_progress=True, preextend=True):
+    cleanup_stale_request_lock_files(show_progress=show_progress)
+    jobs = collect_unique_request_jobs(task_specs)
+    if not jobs:
+        return 0, 0
+
+    workers = max(1, min(int(max_workers or 1), len(jobs)))
+    created = 0
+    reused = 0
+    extended = 0
+    if show_progress:
+        print(
+            f"precreate request files: unique={len(jobs)}, workers={workers}, "
+            f"preextend={bool(preextend and SETTINGS.get('steady_preextend_enabled', True))}"
+        )
+
+    payloads = [(sim_index, row, bool(preextend)) for sim_index, row in jobs]
+    if workers == 1:
+        results = [_generate_request_file_task(payload) for payload in payloads]
+    else:
+        results = []
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(_generate_request_file_task, payload) for payload in payloads]
+            pending = set(futures)
+            while pending:
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    results.append(future.result())
+
+    for _path, was_created, appended, _horizon in results:
+        if was_created:
+            created += 1
+        else:
+            reused += 1
+        if appended:
+            extended += 1
+
+    if show_progress:
+        print(
+            f"precreate done: created={created}, reused={reused}, "
+            f"extended={extended}/{len(results)}"
+        )
+    return created, reused
 
 
 def retarget_output_files_for_benchmark(config, output_root, task_label):
@@ -190,6 +473,29 @@ def load_config_rows(config_file):
             if not str(row[0]).startswith("#"):
                 rows.append(row)
     return rows
+
+
+def _drain_progress_queue(progress_queue, show_progress):
+    if progress_queue is None or not show_progress:
+        return
+    while True:
+        try:
+            msg = progress_queue.get_nowait()
+        except Empty:
+            break
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("type") != "steady_batch":
+            continue
+        print(
+            f"[steady] repeat={msg.get('sim_index')} config_index={msg.get('config_index')} "
+            f"lambda={msg.get('lambda')} mu={msg.get('mu')} "
+            f"batch={msg.get('batch')} n={msg.get('n')} "
+            f"elapsed={msg.get('elapsed'):.3f} "
+            f"total={msg.get('ex_time_total'):.6g} wait={msg.get('ex_time_wait'):.6g} "
+            f"instances={msg.get('ave_instances'):.4g}",
+            flush=True,
+        )
 
 
 def run_task_specs(task_specs, max_workers, write_summary, show_progress, output_root=None):
@@ -217,48 +523,84 @@ def run_task_specs(task_specs, max_workers, write_summary, show_progress, output
         return 0.0, []
 
     timer = time.time()
+    manager = None
+    progress_queue = None
     try:
         # Avoid concurrent request-file creation races in worker processes.
-        precreate_request_files(pending_task_specs)
+        precreate_request_files(
+            pending_task_specs,
+            max_workers=max_workers,
+            show_progress=show_progress,
+            preextend=(output_root is None),
+        )
 
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        manager = mp.Manager()
+        progress_queue = manager.Queue()
+
+        with ProcessPoolExecutor(
+            max_workers=max_workers,
+            initializer=init_progress_queue,
+            initargs=(progress_queue,),
+        ) as executor:
             for order_idx, (sim_index, config_idx, row) in enumerate(pending_task_specs):
                 config = setup_config(row, sim_index)
+                config.TASK_SIM_INDEX = sim_index
+                config.TASK_CONFIG_INDEX = config_idx
                 if output_root is not None:
                     task_label = f"task{order_idx}_rep{sim_index}_cfg{config_idx}"
                     config = retarget_output_files_for_benchmark(config, output_root, task_label)
+                    # Autotune/profile: steady off, stop after N completions (not LIMIT_TIME:
+                    # that mode also drains the whole preloaded 10k-request CSV).
+                    config.STEADY_FORCE_DISABLED = True
+                    profile_sim_time = float(SETTINGS.get("autotune_profile_sim_time", 30.0) or 30.0)
+                    config.SIM_LIMIT = Limit.LIMIT_REQUEST
+                    config.SIM_THRESHOLD = estimate_profile_request_threshold(config, profile_sim_time)
+                    apply_steady_settings(config)
                 future = executor.submit(simulate, config)
                 futures.append(future)
                 future_meta[future] = (sim_index, config_idx)
 
             completed = 0
-            for future in as_completed(futures):
-                summary = future.result()
-                if write_summary:
-                    output_file = summary["summary_output_file"]
-                    if output_file not in summary_writers:
-                        needs_header = (not os.path.isfile(output_file)) or os.path.getsize(output_file) == 0
-                        handle = open(output_file, 'a', newline='')
-                        summary_handles[output_file] = handle
-                        writer = csv.writer(handle)
-                        if needs_header:
-                            writer.writerow(SUMMARY_HEADER)
-                        summary_writers[output_file] = writer
-                    summary_writers[output_file].writerow(summary["summary_row"])
-                    summary_handles[output_file].flush()
+            pending = set(futures)
+            while pending:
+                _drain_progress_queue(progress_queue, show_progress)
+                done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+                if not done:
+                    continue
+                for future in done:
+                    summary = future.result()
+                    if write_summary:
+                        output_file = summary["summary_output_file"]
+                        if output_file not in summary_writers:
+                            needs_header = (not os.path.isfile(output_file)) or os.path.getsize(output_file) == 0
+                            handle = open(output_file, 'a', newline='')
+                            summary_handles[output_file] = handle
+                            writer = csv.writer(handle)
+                            if needs_header:
+                                writer.writerow(SUMMARY_HEADER)
+                            summary_writers[output_file] = writer
+                        summary_writers[output_file].writerow(summary["summary_row"])
+                        summary_handles[output_file].flush()
 
-                completed += 1
-                if show_progress:
-                    sim_index, config_idx = future_meta[future]
-                    print(f"[{completed}/{total_tasks}] finished repeat={sim_index} config_index={config_idx}")
+                    completed += 1
+                    if show_progress:
+                        sim_index, config_idx = future_meta[future]
+                        print(
+                            f"[{completed}/{total_tasks}] finished repeat={sim_index} "
+                            f"config_index={config_idx}",
+                            flush=True,
+                        )
 
-                worker_elapsed = summary.get("worker_elapsed_sec")
-                if worker_elapsed is not None:
-                    sim_index, config_idx = future_meta[future]
-                    task_elapsed_records.append((sim_index, config_idx, float(worker_elapsed)))
+                    worker_elapsed = summary.get("worker_elapsed_sec")
+                    if worker_elapsed is not None:
+                        sim_index, config_idx = future_meta[future]
+                        task_elapsed_records.append((sim_index, config_idx, float(worker_elapsed)))
+            _drain_progress_queue(progress_queue, show_progress)
     finally:
         for handle in summary_handles.values():
             handle.close()
+        if manager is not None:
+            manager.shutdown()
 
     return time.time() - timer, task_elapsed_records
 
@@ -291,19 +633,22 @@ def autotune_max_workers(config_rows, sim_count_start, sim_count_end, cpu_budget
         max_value=total_rounds,
     )
 
+    profile_indices = select_autotune_profile_indices(config_rows, config_count)
     profile_tasks = build_task_specs(
         config_rows,
         sim_count_start,
         sim_count_end,
-        config_limit=config_count,
         round_limit=profile_round_limit,
+        row_indices=profile_indices,
     )
     full_tasks = build_task_specs(config_rows, sim_count_start, sim_count_end)
 
     candidates = parse_candidate_workers(cpu_budget, SETTINGS.get("autotune_candidates"))
+    profile_sim_time = float(SETTINGS.get("autotune_profile_sim_time", 30.0) or 30.0)
     print("=== AUTOTUNE START ===")
     print(
-        f"profile_configs={config_count}, profile_rounds={profile_round_limit}, "
+        f"profile_configs={len(profile_indices)}, profile_indices={profile_indices}, "
+        f"profile_rounds={profile_round_limit}, profile_sim_time={profile_sim_time}, "
         f"profile_tasks={len(profile_tasks)}, total_tasks={len(full_tasks)}"
     )
     print(f"candidates={candidates}")
@@ -322,7 +667,7 @@ def autotune_max_workers(config_rows, sim_count_start, sim_count_end, cpu_budget
             profile_tasks,
             max_workers=profile_workers,
             write_summary=False,
-            show_progress=False,
+            show_progress=True,
             output_root=run_root,
         )
         print(f"profile_run workers={profile_workers}: elapsed={profile_elapsed:.3f}s, records={len(profile_records)}")
@@ -363,7 +708,18 @@ def autotune_max_workers(config_rows, sim_count_start, sim_count_end, cpu_budget
     print(f"=== AUTOTUNE DONE: selected max_workers={best_workers} ===")
     return best_workers, predicted_rows
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run microservice_sim experiments.")
+    parser.add_argument(
+        "--generate-requests-only",
+        action="store_true",
+        help="Pre-generate shared request CSVs in parallel and exit (ignores SETTINGS['generate_requests_only']).",
+    )
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
     config_file = SETTINGS.get("config_file", "config_list.csv")
     sim_count_start = clamp_int(SETTINGS.get("sim_count_start"), 0, min_value=0)
     sim_count_end = clamp_int(SETTINGS.get("sim_count_end"), 1, min_value=sim_count_start + 1)
@@ -376,8 +732,27 @@ def main():
     reserved_cores = resolve_reserved_cores(total_cores)
     cpu_budget = max(1, total_cores - reserved_cores)
 
+    generate_requests_only = bool(args.generate_requests_only) or bool(
+        SETTINGS.get("generate_requests_only", False)
+    )
     autotune_enabled = bool(SETTINGS.get("autotune_enabled", False))
     autotune_only = bool(SETTINGS.get("autotune_only", False))
+
+    if generate_requests_only:
+        max_workers = resolve_max_workers(
+            default_workers=min(5, cpu_budget),
+            max_cap=cpu_budget,
+            configured_workers=SETTINGS.get("max_workers"),
+        )
+        task_specs = build_task_specs(config_rows, sim_count_start, sim_count_end)
+        print(
+            f"generate_requests_only=True: unique streams from {len(config_rows)} configs "
+            f"x {sim_count_end - sim_count_start} repeats, workers={max_workers}"
+        )
+        timer = time.time()
+        precreate_request_files(task_specs, max_workers=max_workers, show_progress=True)
+        print(f"request generation elapsed={time.time() - timer:.3f}s")
+        return
 
     if autotune_enabled:
         max_workers, _bench_results = autotune_max_workers(
@@ -412,28 +787,30 @@ def main():
         show_progress=True,
         output_root=None,
     )
-        
+
         # for row in reader:
         #     if(not str(row[0]).startswith("#")):
         #         config = Config()
         #         config.initialSetup(row)
         #         simulate(config)
-    
+
     print("========total time========")
     print(time.time() - sim_timer)
-        
+
     return
 
 # def setupConfig(config_file):
 #     config = Config(config_file)
 #     config.initialSetup()
 #     return config
-    
+
 
 def simulate(config:Config):
     # results = []
     worker_timer = time.time()
     setattr(config, "SIM_ENABLE_HYBRID_SKIP", bool(SETTINGS.get("enable_hybrid_skip", True)))
+    setattr(config, "SIM_ENABLE_SCALE_CHECK_SKIP", bool(SETTINGS.get("enable_scale_check_skip", True)))
+    apply_steady_settings(config)
     step_per_time = config.SIM_STEP_PER_TIME
     _lambda = decimal_normalize(config.CONFIG_LAMBDA)
     mu = decimal_normalize(config.CONFIG_MU)
@@ -442,17 +819,12 @@ def simulate(config:Config):
     sim = QueueSimulator(config.SIM_THRESHOLD, config.SIM_LIMIT, step_per_time, _lambda, mu, config)
     with open(outfile, 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(["step_per_time", "total_time", "num_steps", "num_reqs", "ex_time_service", "ex_time_wait", "ex_time_total"])
-        # writer.writerow(["step_per_time", "total_time", "num_steps", "num_reqs", " ideal_rho", " ex_rho", " ideal_time_service", " ex_time_service", " ideal_time_wait", " ex_time_wait", " ideal_time_total", " ex_time_total"])
-
+        writer.writerow(RESULT_HEADER)
 
         sim.startSimulate()
         summary = sim.endSimulate(config.CONFIG_DEFAULT_FLG)
         sim = None
-        line = []
-        line.append(step_per_time)
-        line.extend(summary["result"])
-        writer.writerow(line)
+        writer.writerow(summary["result_row"])
         f.flush()
 
     summary["worker_elapsed_sec"] = time.time() - worker_timer
@@ -467,7 +839,7 @@ def simulate(config:Config):
 #         str_limit = "step"
 #     elif limit == Limit.LIMIT_REQUEST:
 #         str_limit = "reqs"
-    
+
 #     if Config.CONFIG_DEFAULT_FLG:
 #         # outfile = "./result/" + str(date) + str(Config.CONFIG_DEFAULT_NUM) + "srv_" + str(Config.CONFIG_DEFAULT_num_CPU) + "CPU_" + str(threshold) + str_limit + "_lambda" + str(_lambda) + "_mu" + str(mu) + "_results"
 #         outfile = Config.SIM_DEFAULT_SERVER_OUTPUT_FILE + "_results"
