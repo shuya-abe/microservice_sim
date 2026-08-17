@@ -583,10 +583,25 @@ class QueueSimulator:
             )
             default_start_instances = max(0, min(int(default_start_instances), self.config.CONFIG_DEFAULT_NUM))
 
+            # Stagger serverless idle timers across initially ACTIVE instances.
+            # last_time is in steps (same unit as timestep). Idle age of the k-th
+            # starter (k=0..n-1) is k*τ/n, so last_time = -k*τ_steps/n (may be < 0).
+            serverless_timer_steps = (
+                self.config.CONFIG_SERVERLESS_TIMER * self.config.SIM_STEP_PER_TIME
+                if Flg.is_serverless(self.mode) and default_start_instances > 0
+                else None
+            )
+
             for i in range(self.config.CONFIG_DEFAULT_NUM):
                 initial_status = Status.ACTIVE if i < default_start_instances else status
                 instance = self.createInstance(capacity, num_CPU, queue_length, initial_status)
                 instance.setId(i)
+                if (
+                    serverless_timer_steps is not None
+                    and initial_status == Status.ACTIVE
+                    and isinstance(instance, Serverless)
+                ):
+                    instance.setLastTime(-(i * serverless_timer_steps) // default_start_instances)
                 if not cluster.addInstance(instance):
                     break
                 cluster.registerInstance2Scaler(instance)
